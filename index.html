@@ -71,6 +71,12 @@
 
       <!-- Right Actions: CRT Toggle, Undo/Redo, Export -->
       <div class="header-actions">
+        <button id="btn-undo" class="pixel-btn btn-sm btn-undo" title="Deshacer última acción (Ctrl+Z)" disabled>
+          ↩ DESHACER
+        </button>
+        <button id="btn-redo" class="pixel-btn btn-sm btn-redo" title="Rehacer acción (Ctrl+Y / Ctrl+Shift+Z)" disabled>
+          ↪ REHACER
+        </button>
         <button id="btn-toggle-crt" class="pixel-btn btn-sm btn-crt active" title="Alternar efecto CRT / Scanlines">
           📺 CRT: ON
         </button>
@@ -172,6 +178,13 @@
       <!-- Timeline Header Toolbar -->
       <div class="timeline-toolbar">
         <div class="timeline-tools-left">
+          <button id="btn-tool-undo" class="pixel-tool-btn" title="Deshacer (Ctrl+Z)" disabled>
+            ↩ DESHACER
+          </button>
+          <button id="btn-tool-redo" class="pixel-tool-btn" title="Rehacer (Ctrl+Y)" disabled>
+            ↪ REHACER
+          </button>
+          <div class="toolbar-sep"></div>
           <button id="btn-tool-split" class="pixel-tool-btn" title="Dividir / Cortar clip en cabezal (Ctrl+B)">
             ✂️ CORTAR (B)
           </button>

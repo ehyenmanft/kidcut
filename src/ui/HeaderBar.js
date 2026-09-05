@@ -40,6 +40,43 @@ export function setupHeaderBar(timelineEngine, onOpenExport) {
     if (sfxOn) audioEngine.playCoin();
   });
 
+  // Undo & Redo buttons
+  const undoBtn = document.getElementById('btn-undo');
+  const redoBtn = document.getElementById('btn-redo');
+
+  if (undoBtn) {
+    undoBtn.addEventListener('click', () => {
+      timelineEngine.undo();
+    });
+  }
+
+  if (redoBtn) {
+    redoBtn.addEventListener('click', () => {
+      timelineEngine.redo();
+    });
+  }
+
+  // Update Undo/Redo button states
+  const updateHistoryButtons = () => {
+    const canUndo = timelineEngine.canUndo();
+    const canRedo = timelineEngine.canRedo();
+    if (undoBtn) {
+      undoBtn.disabled = !canUndo;
+      undoBtn.classList.toggle('disabled', !canUndo);
+    }
+    if (redoBtn) {
+      redoBtn.disabled = !canRedo;
+      redoBtn.classList.toggle('disabled', !canRedo);
+    }
+  };
+
+  timelineEngine.subscribe((event) => {
+    if (event === 'historystatechange' || event === 'trackschange') {
+      updateHistoryButtons();
+    }
+  });
+  updateHistoryButtons();
+
   // Export Modal Trigger
   const exportBtn = document.getElementById('btn-export-modal');
   exportBtn.addEventListener('click', () => {

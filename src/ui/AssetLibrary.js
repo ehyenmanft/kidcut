@@ -5,23 +5,24 @@
  */
 
 import { audioEngine } from '../engine/AudioEngine.js';
+import { AudioExtractor } from '../engine/AudioExtractor.js';
 import { ALL_EFFECTS, EFFECT_CATEGORIES, RetroTransitions, TextAnimations } from '../engine/EffectsDatabase.js';
 
+// Local store of imported media assets
+const importedAssets = [];
+
 export function setupAssetLibrary(timelineEngine) {
-  const navTabs = document.querySelectorAll('.resource-nav .nav-tab');
   const contentArea = document.getElementById('resource-content-area');
+  const navTabs = document.querySelectorAll('.resource-nav .nav-tab');
 
-  let currentTab = 'media';
-  let activeEffectCategory = 'all';
-  let effectSearchQuery = '';
-  const importedAssets = [];
+  let activeTab = 'media';
 
-  // Tab switching
+  // Navigation tab switching
   navTabs.forEach(tab => {
     tab.addEventListener('click', () => {
       navTabs.forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      currentTab = tab.dataset.tab;
+      activeTab = tab.dataset.tab;
       renderTabContent();
       audioEngine.playBeep(480, 'square', 0.04);
     });
@@ -29,17 +30,22 @@ export function setupAssetLibrary(timelineEngine) {
 
   function renderTabContent() {
     contentArea.innerHTML = '';
-
-    if (currentTab === 'media') {
-      renderMediaTab();
-    } else if (currentTab === 'text') {
-      renderTextTab();
-    } else if (currentTab === 'stickers') {
-      renderStickersTab();
-    } else if (currentTab === 'chiptune') {
-      renderChiptuneTab();
-    } else if (currentTab === 'fx') {
-      renderFxTab();
+    switch (activeTab) {
+      case 'media':
+        contentArea.appendChild(renderMediaTab());
+        break;
+      case 'text':
+        contentArea.appendChild(renderTextTab());
+        break;
+      case 'stickers':
+        contentArea.appendChild(renderStickersTab());
+        break;
+      case 'chiptune':
+        contentArea.appendChild(renderChiptuneTab());
+        break;
+      case 'fx':
+        contentArea.appendChild(renderFxTab());
+        break;
     }
   }
 
@@ -48,10 +54,12 @@ export function setupAssetLibrary(timelineEngine) {
   // =========================================================================
   function renderMediaTab() {
     const wrap = document.createElement('div');
+    wrap.className = 'tab-pane media-pane';
+
     wrap.innerHTML = `
       <div class="asset-section-title">
-        <span>ARCHIVOS DE MEDIOS</span>
-        <span style="font-size: 8px; color: var(--text-dim);">${importedAssets.length} ARCHIVOS</span>
+        <span>ARCHIVOS LOCALES</span>
+        <span class="badge-count">${importedAssets.length}</span>
       </div>
 
       <div class="upload-dropzone" id="media-dropzone">
@@ -62,14 +70,15 @@ export function setupAssetLibrary(timelineEngine) {
         <input type="file" id="media-file-input" multiple accept="video/*,audio/*,image/*" style="display: none;" />
       </div>
 
-      <div class="asset-grid" id="media-asset-grid"></div>
+      <div class="asset-section-title" style="margin-top: 15px;">
+        <span>BIBLIOTECA DE MEDIOS</span>
+      </div>
+      <div class="media-grid" id="media-grid"></div>
     `;
-
-    contentArea.appendChild(wrap);
 
     const dropzone = wrap.querySelector('#media-dropzone');
     const fileInput = wrap.querySelector('#media-file-input');
-    const grid = wrap.querySelector('#media-asset-grid');
+    const mediaGrid = wrap.querySelector('#media-grid');
 
     dropzone.addEventListener('click', () => fileInput.click());
 
@@ -85,25 +94,26 @@ export function setupAssetLibrary(timelineEngine) {
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.style.background = 'rgba(0, 240, 255, 0.05)';
-      if (e.dataTransfer.files.length) {
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         handleFiles(e.dataTransfer.files);
       }
     });
 
     fileInput.addEventListener('change', (e) => {
-      if (e.target.files.length) {
+      if (e.target.files && e.target.files.length > 0) {
         handleFiles(e.target.files);
       }
     });
 
-    renderMediaGrid(grid);
+    renderMediaGrid(mediaGrid);
+    return wrap;
   }
 
   function handleFiles(fileList) {
     for (const file of fileList) {
-      const isVideo = file.type.startsWith('video/');
-      const isAudio = file.type.startsWith('audio/');
-      const isImage = file.type.startsWith('image/');
+      const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(file.name);
+      const isAudio = file.type.startsWith('audio/') || /\.(mp3|wav|ogg|aac|m4a|flac)$/i.test(file.name);
+      const isImage = file.type.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp)$/i.test(file.name);
 
       const blobUrl = URL.createObjectURL(file);
       const asset = {
@@ -112,13 +122,14 @@ export function setupAssetLibrary(timelineEngine) {
         type: isVideo ? 'video' : (isAudio ? 'audio' : 'image'),
         url: blobUrl,
         file,
-        hasAudio: false
+        hasAudio: false,
+        extractingAudio: false
       };
 
       if (isVideo) {
         const videoEl = document.createElement('video');
         videoEl.src = blobUrl;
-        videoEl.preload = 'metadata';
+        videoEl.preload = 'auto';
         videoEl.onloadedmetadata = () => {
           asset.duration = videoEl.duration || 5.0;
           asset.mediaElement = videoEl;
@@ -126,17 +137,18 @@ export function setupAssetLibrary(timelineEngine) {
         };
 
         // Extract and preserve original audio from video file
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-          try {
-            asset.audioBuffer = await audioEngine.decodeAudioData(ev.target.result);
+        asset.extractingAudio = true;
+        AudioExtractor.extractAudio(file, blobUrl).then(buffer => {
+          asset.extractingAudio = false;
+          if (buffer) {
+            asset.audioBuffer = buffer;
             asset.hasAudio = true;
-            renderTabContent();
-          } catch (err) {
-            console.log('Video sin pista de audio detectable o formato no soportado por WebAudio:', err);
           }
-        };
-        reader.readAsArrayBuffer(file);
+          renderTabContent();
+        }).catch(() => {
+          asset.extractingAudio = false;
+          renderTabContent();
+        });
 
       } else if (isImage) {
         const imgEl = new Image();
@@ -148,18 +160,19 @@ export function setupAssetLibrary(timelineEngine) {
         };
       } else if (isAudio) {
         asset.duration = 10.0;
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-          try {
-            asset.audioBuffer = await audioEngine.decodeAudioData(ev.target.result);
-            asset.duration = asset.audioBuffer.duration;
+        asset.extractingAudio = true;
+        AudioExtractor.extractAudio(file, blobUrl).then(buffer => {
+          asset.extractingAudio = false;
+          if (buffer) {
+            asset.audioBuffer = buffer;
+            asset.duration = buffer.duration;
             asset.hasAudio = true;
-            renderTabContent();
-          } catch (e) {
-            console.error('Error decodificando audio:', e);
           }
-        };
-        reader.readAsArrayBuffer(file);
+          renderTabContent();
+        }).catch(() => {
+          asset.extractingAudio = false;
+          renderTabContent();
+        });
       }
 
       importedAssets.push(asset);
@@ -185,7 +198,12 @@ export function setupAssetLibrary(timelineEngine) {
       if (asset.type === 'audio') icon = '🎵';
       if (asset.type === 'image') icon = '🖼️';
 
-      const audioBadge = asset.hasAudio ? '<span style="color: var(--color-cyan); font-size: 7px;">[+AUDIO]</span>' : '';
+      let audioBadge = '';
+      if (asset.hasAudio) {
+        audioBadge = '<span style="color: var(--color-cyan); font-size: 7px; font-weight: bold;">[🔊 AUDIO]</span>';
+      } else if (asset.extractingAudio) {
+        audioBadge = '<span style="color: var(--color-gold); font-size: 7px;">[⏳ AUDIO...]</span>';
+      }
 
       card.innerHTML = `
         <div class="asset-thumb">${icon}</div>
@@ -205,26 +223,29 @@ export function setupAssetLibrary(timelineEngine) {
     const dur = asset.duration || 5.0;
 
     if (asset.type === 'video') {
+      timelineEngine.pushState(`Añadir Video ${asset.name}`);
+
       // 1. Add video clip to Track V1
-      timelineEngine.addClip('track-v1', {
+      const videoClip = timelineEngine.addClip('track-v1', {
         name: asset.name,
         type: 'video',
         start: curTime,
         duration: dur,
         mediaElement: asset.mediaElement,
-        audioBuffer: asset.audioBuffer, // Attached directly to clip
+        audioBuffer: asset.audioBuffer,
         scale: 1.0
-      });
+      }, true);
 
-      // 2. Automatically link its audio on Audio Track A1 so user has full multitrack control
+      // 2. Automatically link its original audio on Audio Track A1 so user has full multitrack control
       if (asset.audioBuffer) {
         timelineEngine.addClip('track-a1', {
           name: `${asset.name} (AUDIO)`,
           type: 'audio',
           start: curTime,
           duration: dur,
-          audioBuffer: asset.audioBuffer
-        });
+          audioBuffer: asset.audioBuffer,
+          sourceVideoClipId: videoClip ? videoClip.id : null
+        }, true);
       }
     } else if (asset.type === 'image') {
       timelineEngine.addClip('track-v1', {

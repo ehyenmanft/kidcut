@@ -1,0 +1,19 @@
+﻿====================================================================
+           â˜… KIDCUT - 8-BIT RETRO PIXEL VIDEO STUDIO â˜…
+====================================================================
+
+COMO EJECUTAR:
+1. Haz doble clic sobre 'KidCut.exe'.
+2. Se abrira automaticamente la ventana de control arcade y tu navegador
+   en modo aplicacion de pantalla completa.
+3. Puedes hacer clic en el boton para crear un acceso directo en tu Escritorio.
+4. Al minimizar la ventana de control, KidCut permanece activo en la bandeja.
+
+REQUISITOS DEL SISTEMA:
+- Windows 7, 8, 10 o 11 (64-bit)
+- No requiere instalar Node.js ni Electron.
+- No requiere permisos de Administrador.
+
+====================================================================
+               Desarrollado para KidCut Studios
+====================================================================

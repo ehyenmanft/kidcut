@@ -1288,3 +1288,46 @@ body.crt-active .crt-lines {
   border-color: var(--color-cyan);
 }
 
+/* UNDO / REDO BUTTONS & HISTORY CONTROLS */
+.btn-undo, .btn-redo {
+  background: var(--bg-card);
+  border: 2px solid var(--border-pixel);
+  color: var(--color-cyan);
+  font-size: 7px;
+  padding: 4px 8px;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 #000;
+  transition: all 0.08s ease;
+}
+
+.btn-undo:not(:disabled):hover, .btn-redo:not(:disabled):hover {
+  background: var(--color-cyan);
+  color: #000;
+  border-color: #fff;
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+  transform: translate(-1px, -1px);
+}
+
+.btn-undo:not(:disabled):active, .btn-redo:not(:disabled):active {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+
+button:disabled,
+.pixel-btn:disabled,
+.pixel-tool-btn:disabled,
+.pixel-btn.disabled,
+.pixel-tool-btn.disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(1) !important;
+  pointer-events: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+#btn-tool-undo, #btn-tool-redo {
+  font-weight: bold;
+  color: var(--color-cyan);
+}
+

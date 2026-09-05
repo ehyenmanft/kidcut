@@ -302,6 +302,7 @@ export function setupInspectorView(timelineEngine) {
     const filterSelect = document.getElementById('prop-filter-select');
     if (filterSelect) {
       filterSelect.addEventListener('change', (e) => {
+        timelineEngine.pushState('Cambiar Filtro');
         clip.filter = e.target.value;
         timelineEngine.notify('clipupdated', { clip });
       });
@@ -310,6 +311,7 @@ export function setupInspectorView(timelineEngine) {
     const filterIntensity = document.getElementById('prop-filter-intensity');
     const labelIntensity = document.getElementById('label-filter-intensity');
     if (filterIntensity) {
+      filterIntensity.addEventListener('change', () => timelineEngine.pushState('Intensidad Filtro'));
       filterIntensity.addEventListener('input', (e) => {
         clip.filterIntensity = parseInt(e.target.value);
         if (labelIntensity) labelIntensity.textContent = `${clip.filterIntensity}%`;
@@ -321,6 +323,7 @@ export function setupInspectorView(timelineEngine) {
     const transSelect = document.getElementById('prop-transition-select');
     if (transSelect) {
       transSelect.addEventListener('change', (e) => {
+        timelineEngine.pushState('Cambiar Transición');
         clip.transition = e.target.value;
         timelineEngine.notify('clipupdated', { clip });
       });
@@ -329,6 +332,7 @@ export function setupInspectorView(timelineEngine) {
     const transDur = document.getElementById('prop-trans-dur');
     const labelTransDur = document.getElementById('label-trans-dur');
     if (transDur) {
+      transDur.addEventListener('change', () => timelineEngine.pushState('Duración Transición'));
       transDur.addEventListener('input', (e) => {
         clip.transitionDuration = parseFloat(e.target.value);
         if (labelTransDur) labelTransDur.textContent = `${clip.transitionDuration.toFixed(1)}s`;
@@ -340,6 +344,7 @@ export function setupInspectorView(timelineEngine) {
     const volume = document.getElementById('prop-volume');
     const labelVolume = document.getElementById('label-volume');
     if (volume) {
+      volume.addEventListener('change', () => timelineEngine.pushState('Ajustar Volumen'));
       volume.addEventListener('input', (e) => {
         clip.volume = parseFloat(e.target.value);
         if (labelVolume) labelVolume.textContent = `${Math.round(clip.volume * 100)}%`;
@@ -350,6 +355,7 @@ export function setupInspectorView(timelineEngine) {
     const speed = document.getElementById('prop-speed');
     const labelSpeed = document.getElementById('label-speed');
     if (speed) {
+      speed.addEventListener('change', () => timelineEngine.pushState('Ajustar Velocidad'));
       speed.addEventListener('input', (e) => {
         clip.speed = parseFloat(e.target.value);
         if (labelSpeed) labelSpeed.textContent = `${clip.speed}x`;

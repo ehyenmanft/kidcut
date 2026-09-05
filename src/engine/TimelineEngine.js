@@ -1,6 +1,7 @@
 /**
  * KIDCUT TIMELINE ENGINE
- * Multi-track state management, playback loop, splitting, trimming & snapping.
+ * Multi-track state management, playback loop, splitting, trimming, snapping,
+ * full Undo/Redo history stack, and synchronized native video & audio playback.
  */
 
 import { audioEngine } from './AudioEngine.js';
@@ -25,6 +26,11 @@ export class TimelineEngine {
       { id: 'track-a2', name: 'A2 (EFECTOS)', type: 'audio', order: 2, muted: false, locked: false, clips: [] }
     ];
 
+    // Undo / Redo History Stacks
+    this.history = [];
+    this.redoStack = [];
+    this.maxHistory = 50;
+
     this.listeners = new Set();
     this.animationFrameId = null;
     this.lastPlaybackTimestamp = null;
@@ -41,7 +47,108 @@ export class TimelineEngine {
     }
   }
 
-  // Playback controls
+  // =========================================================================
+  // UNDO & REDO STATE MANAGEMENT
+  // =========================================================================
+  captureSnapshot(action = 'Modificación') {
+    return {
+      action,
+      currentTime: this.currentTime,
+      selectedClipId: this.selectedClipId,
+      tracks: this.tracks.map(t => ({
+        ...t,
+        clips: t.clips.map(c => ({
+          ...c,
+          mediaElement: c.mediaElement,
+          audioBuffer: c.audioBuffer
+        }))
+      }))
+    };
+  }
+
+  pushState(action = 'Modificación') {
+    const snapshot = this.captureSnapshot(action);
+    this.history.push(snapshot);
+    if (this.history.length > this.maxHistory) {
+      this.history.shift();
+    }
+    // Clear redo stack upon new action
+    this.redoStack = [];
+    this.notify('historystatechange', {
+      canUndo: this.canUndo(),
+      canRedo: this.canRedo(),
+      action
+    });
+  }
+
+  undo() {
+    if (!this.canUndo()) return false;
+
+    // Save current state to redo stack
+    const currentSnapshot = this.captureSnapshot('Current');
+    this.redoStack.push(currentSnapshot);
+
+    // Pop previous state
+    const previousState = this.history.pop();
+    this.restoreSnapshot(previousState);
+
+    audioEngine.playBeep(300, 'sawtooth', 0.08);
+    this.notify('historystatechange', {
+      canUndo: this.canUndo(),
+      canRedo: this.canRedo(),
+      action: 'Undo'
+    });
+    return true;
+  }
+
+  redo() {
+    if (!this.canRedo()) return false;
+
+    // Save current state to history stack
+    const currentSnapshot = this.captureSnapshot('Current');
+    this.history.push(currentSnapshot);
+
+    // Pop next state from redo stack
+    const nextState = this.redoStack.pop();
+    this.restoreSnapshot(nextState);
+
+    audioEngine.playBeep(650, 'triangle', 0.08);
+    this.notify('historystatechange', {
+      canUndo: this.canUndo(),
+      canRedo: this.canRedo(),
+      action: 'Redo'
+    });
+    return true;
+  }
+
+  restoreSnapshot(state) {
+    if (!state) return;
+    this.tracks = state.tracks.map(t => ({
+      ...t,
+      clips: t.clips.map(c => ({ ...c }))
+    }));
+    this.currentTime = state.currentTime !== undefined ? state.currentTime : this.currentTime;
+    this.selectedClipId = state.selectedClipId;
+
+    this.calculateTotalDuration();
+    this.syncAudioPlayback();
+    this.syncVideoMediaElements();
+    this.notify('trackschange', { tracks: this.tracks });
+    this.notify('timeupdate', { currentTime: this.currentTime });
+    this.notify('clipselected', { clip: this.getSelectedClip() });
+  }
+
+  canUndo() {
+    return this.history.length > 0;
+  }
+
+  canRedo() {
+    return this.redoStack.length > 0;
+  }
+
+  // =========================================================================
+  // PLAYBACK CONTROLS & VIDEO / AUDIO SYNCHRONIZATION
+  // =========================================================================
   play() {
     if (this.isPlaying) return;
     this.isPlaying = true;
@@ -50,6 +157,7 @@ export class TimelineEngine {
 
     // Start playing all currently active audio clips
     this.syncAudioPlayback();
+    this.syncVideoMediaElements();
 
     const loop = (timestamp) => {
       if (!this.isPlaying) return;
@@ -63,6 +171,7 @@ export class TimelineEngine {
         if (this.isLooping) {
           this.currentTime = 0;
           this.syncAudioPlayback();
+          this.syncVideoMediaElements();
         } else {
           this.currentTime = maxDur;
           this.pause();
@@ -70,6 +179,7 @@ export class TimelineEngine {
         }
       }
 
+      this.syncVideoMediaElements();
       this.notify('timeupdate', { currentTime: this.currentTime });
       this.animationFrameId = requestAnimationFrame(loop);
     };
@@ -86,6 +196,7 @@ export class TimelineEngine {
       this.animationFrameId = null;
     }
     audioEngine.stopAll();
+    this.syncVideoMediaElements();
     this.notify('playbackchange', { isPlaying: false });
   }
 
@@ -106,6 +217,7 @@ export class TimelineEngine {
     } else if (!this.isPlaying) {
       audioEngine.stopAll();
     }
+    this.syncVideoMediaElements();
 
     this.notify('timeupdate', { currentTime: this.currentTime });
   }
@@ -139,10 +251,65 @@ export class TimelineEngine {
     }
   }
 
-  // Clip management
-  addClip(trackId, clipData) {
+  /**
+   * Synchronizes native HTMLVideoElement audio & playback with the timeline.
+   * Guarantees original video audio plays seamlessly without delay.
+   */
+  syncVideoMediaElements() {
+    for (const track of this.tracks) {
+      if (track.type === 'video') {
+        for (const clip of track.clips) {
+          if (clip.mediaElement && clip.mediaElement.tagName === 'VIDEO') {
+            const video = clip.mediaElement;
+            const clipStart = clip.start;
+            const clipEnd = clip.start + clip.duration;
+            const isActive = this.currentTime >= clipStart && this.currentTime < clipEnd;
+
+            // If an audio clip exists on A1 for this video, mute the video element to avoid doubling
+            const hasDedicatedAudioClip = this.tracks.some(t => 
+              t.type === 'audio' && !t.muted && t.clips.some(c => c.sourceVideoClipId === clip.id && !c.isMuted)
+            );
+
+            const isMuted = track.muted || clip.isMuted || hasDedicatedAudioClip;
+            video.muted = isMuted;
+            video.volume = Math.max(0, Math.min(1, (clip.volume !== undefined ? clip.volume : 1.0)));
+
+            if (this.isPlaying && isActive) {
+              const targetTime = (clip.trimIn || 0) + ((this.currentTime - clipStart) * (clip.speed || 1.0));
+              if (Math.abs(video.currentTime - targetTime) > 0.3) {
+                video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
+              }
+              video.playbackRate = clip.speed || 1.0;
+              if (video.paused) {
+                video.play().catch(() => {});
+              }
+            } else {
+              if (!video.paused) {
+                video.pause();
+              }
+              if (isActive) {
+                const targetTime = (clip.trimIn || 0) + ((this.currentTime - clipStart) * (clip.speed || 1.0));
+                if (Math.abs(video.currentTime - targetTime) > 0.2) {
+                  video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // CLIP MANAGEMENT (WITH AUTOMATIC HISTORY TRACKING)
+  // =========================================================================
+  addClip(trackId, clipData, skipHistory = false) {
     const track = this.tracks.find(t => t.id === trackId);
     if (!track) return null;
+
+    if (!skipHistory) {
+      this.pushState(`Añadir ${clipData.name || 'Clip'}`);
+    }
 
     const newClip = {
       id: 'clip_' + Math.random().toString(36).substr(2, 9),
@@ -162,6 +329,7 @@ export class TimelineEngine {
       filterIntensity: clipData.filterIntensity || 8,
       mediaElement: clipData.mediaElement || null,
       audioBuffer: clipData.audioBuffer || null,
+      sourceVideoClipId: clipData.sourceVideoClipId || null,
       text: clipData.text || '',
       fontSize: clipData.fontSize || 48,
       textColor: clipData.textColor || '#ffd200',
@@ -205,6 +373,8 @@ export class TimelineEngine {
       return false; // Cannot split outside or at boundary
     }
 
+    this.pushState('Cortar Clip');
+
     const firstDuration = splitTime - clipStart;
     const secondDuration = clip.duration - firstDuration;
 
@@ -242,6 +412,7 @@ export class TimelineEngine {
     for (const track of this.tracks) {
       const idx = track.clips.findIndex(c => c.id === this.selectedClipId);
       if (idx !== -1) {
+        this.pushState('Borrar Clip');
         track.clips.splice(idx, 1);
         this.selectedClipId = null;
         this.notify('clipselected', { clip: null });
@@ -258,10 +429,12 @@ export class TimelineEngine {
     const clip = this.getSelectedClip();
     if (!clip) return false;
 
+    this.pushState('Duplicar Clip');
+
     const dup = {
       ...clip,
       id: 'clip_' + Math.random().toString(36).substr(2, 9),
-      name: clip.name + ' (Copia)',
+      name: clip.name + ' (COPIA)',
       start: clip.start + clip.duration + 0.1
     };
 
@@ -279,21 +452,35 @@ export class TimelineEngine {
     return true;
   }
 
-  // Move clip
-  moveClip(clipId, newStart, targetTrackId = null) {
-    let clip = null;
-    let currentTrack = null;
+  // Update clip properties from Inspector or Canvas interaction
+  updateClip(clipId, properties, recordHistory = false) {
+    if (recordHistory) {
+      this.pushState('Editar Propiedades');
+    }
+    const clip = this.getSelectedClip();
+    if (!clip || clip.id !== clipId) return;
 
-    for (const track of this.tracks) {
-      const found = track.clips.find(c => c.id === clipId);
+    Object.assign(clip, properties);
+    this.calculateTotalDuration();
+    this.notify('trackschange', { tracks: this.tracks });
+    this.notify('clipupdated', { clip });
+  }
+
+  // Move clip position in timeline
+  moveClip(clipId, newStart, targetTrackId = null) {
+    let currentTrack = null;
+    let clip = null;
+
+    for (const t of this.tracks) {
+      const found = t.clips.find(c => c.id === clipId);
       if (found) {
+        currentTrack = t;
         clip = found;
-        currentTrack = track;
         break;
       }
     }
 
-    if (!clip) return;
+    if (!clip || !currentTrack) return;
 
     let finalStart = Math.max(0, newStart);
 
@@ -384,6 +571,7 @@ export class TimelineEngine {
   }
 
   addTrack(type) {
+    this.pushState(`Añadir Pista ${type.toUpperCase()}`);
     const count = this.tracks.filter(t => t.type === type).length + 1;
     const prefix = type === 'video' ? 'V' : 'A';
     const newTrack = {

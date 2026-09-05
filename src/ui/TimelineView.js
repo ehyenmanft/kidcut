@@ -44,6 +44,52 @@ export function setupTimelineView(timelineEngine) {
   });
 
   // Toolbar action buttons
+  const toolUndoBtn = document.getElementById('btn-tool-undo');
+  const toolRedoBtn = document.getElementById('btn-tool-redo');
+
+  if (toolUndoBtn) {
+    toolUndoBtn.addEventListener('click', () => timelineEngine.undo());
+  }
+  if (toolRedoBtn) {
+    toolRedoBtn.addEventListener('click', () => timelineEngine.redo());
+  }
+
+  const updateToolHistoryButtons = () => {
+    const canUndo = timelineEngine.canUndo();
+    const canRedo = timelineEngine.canRedo();
+    if (toolUndoBtn) {
+      toolUndoBtn.disabled = !canUndo;
+      toolUndoBtn.classList.toggle('disabled', !canUndo);
+    }
+    if (toolRedoBtn) {
+      toolRedoBtn.disabled = !canRedo;
+      toolRedoBtn.classList.toggle('disabled', !canRedo);
+    }
+  };
+
+  timelineEngine.subscribe((event) => {
+    if (event === 'historystatechange' || event === 'trackschange') {
+      updateToolHistoryButtons();
+    }
+  });
+  updateToolHistoryButtons();
+
+  // Global Keyboard Shortcuts: Ctrl+Z (Undo), Ctrl+Y / Ctrl+Shift+Z (Redo)
+  window.addEventListener('keydown', (e) => {
+    const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || (document.activeElement && document.activeElement.isContentEditable)) {
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      timelineEngine.undo();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+      e.preventDefault();
+      timelineEngine.redo();
+    }
+  });
+
   document.getElementById('btn-tool-split').addEventListener('click', () => {
     const success = timelineEngine.splitSelectedClip();
     if (!success) {
@@ -238,6 +284,7 @@ export function setupTimelineView(timelineEngine) {
 
   // Clip Drag & Move Handler
   function startDraggingClip(clip, startEvent) {
+    timelineEngine.pushState(`Mover ${clip.name}`);
     const startX = startEvent.clientX;
     const initialStart = clip.start;
     audioEngine.playBeep(420, 'square', 0.04);
@@ -261,6 +308,7 @@ export function setupTimelineView(timelineEngine) {
   // Clip Trim In/Out Handler
   function startTrimmingClip(clip, edge, startEvent) {
     timelineEngine.selectClip(clip.id);
+    timelineEngine.pushState(`Recortar ${clip.name}`);
     const startX = startEvent.clientX;
 
     const onMouseMove = (e) => {
