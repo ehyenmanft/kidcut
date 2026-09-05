@@ -65,16 +65,28 @@ export function setupTimelineView(timelineEngine) {
       toolRedoBtn.disabled = !canRedo;
       toolRedoBtn.classList.toggle('disabled', !canRedo);
     }
+
+    const delBtn = document.getElementById('btn-tool-delete');
+    const dupBtn = document.getElementById('btn-tool-duplicate');
+    const count = timelineEngine.selectedClipIds ? timelineEngine.selectedClipIds.size : (timelineEngine.selectedClipId ? 1 : 0);
+    if (delBtn) {
+      delBtn.innerHTML = count > 1 ? `🗑 BORRAR (${count})` : '🗑 BORRAR';
+      delBtn.title = count > 1 ? `Borrar ${count} clips agrupados (Supr/Del)` : 'Borrar clip seleccionado';
+    }
+    if (dupBtn) {
+      dupBtn.innerHTML = count > 1 ? `📄 DUPLICAR (${count})` : '📄 DUPLICAR';
+      dupBtn.title = count > 1 ? `Duplicar ${count} clips agrupados` : 'Duplicar clip seleccionado';
+    }
   };
 
   timelineEngine.subscribe((event) => {
-    if (event === 'historystatechange' || event === 'trackschange') {
+    if (event === 'historystatechange' || event === 'trackschange' || event === 'clipselected') {
       updateToolHistoryButtons();
     }
   });
   updateToolHistoryButtons();
 
-  // Global Keyboard Shortcuts: Ctrl+Z (Undo), Ctrl+Y / Ctrl+Shift+Z (Redo)
+  // Global Keyboard Shortcuts: Ctrl+Z (Undo), Ctrl+Y / Ctrl+Shift+Z (Redo), Delete/Backspace (Delete Selected)
   window.addEventListener('keydown', (e) => {
     const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || (document.activeElement && document.activeElement.isContentEditable)) {
@@ -87,6 +99,9 @@ export function setupTimelineView(timelineEngine) {
     } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
       e.preventDefault();
       timelineEngine.redo();
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      timelineEngine.deleteSelectedClip();
     }
   });
 
@@ -211,6 +226,96 @@ export function setupTimelineView(timelineEngine) {
     }
   });
 
+  // Marquee / Box Selection DOM Element
+  const marqueeEl = document.createElement('div');
+  marqueeEl.className = 'timeline-marquee';
+  tracksContainer.appendChild(marqueeEl);
+
+  // Marquee drag selection interaction (Hold & drag pointer to group clips)
+  let isMarquee = false;
+  let marqueeStartX = 0;
+  let marqueeStartY = 0;
+
+  tracksContainer.addEventListener('mousedown', (e) => {
+    // If clicking inside a clip, handle, or track button, do not start marquee
+    if (e.target.closest('.timeline-clip') || e.target.closest('.trim-handle') || e.target.closest('.track-icon-btn')) {
+      return;
+    }
+
+    const rect = tracksContainer.getBoundingClientRect();
+    const scrollLeft = scrollArea.scrollLeft;
+    marqueeStartX = e.clientX - rect.left + scrollLeft;
+    marqueeStartY = e.clientY - rect.top;
+    isMarquee = false;
+
+    const onMouseMove = (moveEvt) => {
+      const currentX = moveEvt.clientX - rect.left + scrollArea.scrollLeft;
+      const currentY = moveEvt.clientY - rect.top;
+
+      const x1 = Math.min(marqueeStartX, currentX);
+      const x2 = Math.max(marqueeStartX, currentX);
+      const y1 = Math.min(marqueeStartY, currentY);
+      const y2 = Math.max(marqueeStartY, currentY);
+
+      if (x2 - x1 > 4 || y2 - y1 > 4) {
+        isMarquee = true;
+        marqueeEl.style.display = 'block';
+        marqueeEl.style.left = `${x1}px`;
+        marqueeEl.style.top = `${y1}px`;
+        marqueeEl.style.width = `${x2 - x1}px`;
+        marqueeEl.style.height = `${y2 - y1}px`;
+
+        // Check intersection with all rendered clips
+        const selectedIds = [];
+        const clipEls = tracksContainer.querySelectorAll('.timeline-clip');
+        clipEls.forEach(el => {
+          const elLeft = el.offsetLeft;
+          const elRight = el.offsetLeft + el.offsetWidth;
+          const elTop = el.parentElement.offsetTop;
+          const elBottom = elTop + el.parentElement.offsetHeight;
+
+          const intersects = !(x2 < elLeft || x1 > elRight || y2 < elTop || y1 > elBottom);
+          if (intersects) {
+            el.classList.add('selected', 'multi-selected');
+            if (el.dataset.clipId) {
+              selectedIds.push(el.dataset.clipId);
+            }
+          } else {
+            el.classList.remove('multi-selected');
+            if (!selectedIds.includes(el.dataset.clipId)) {
+              el.classList.remove('selected');
+            }
+          }
+        });
+
+        if (selectedIds.length > 0) {
+          timelineEngine.selectClips(selectedIds);
+          updateToolHistoryButtons();
+        }
+      }
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+
+      marqueeEl.style.display = 'none';
+
+      if (!isMarquee) {
+        // Simple click on empty area clears selection
+        timelineEngine.clearSelection();
+        render();
+      } else {
+        render();
+        audioEngine.playBeep(480, 'square', 0.05);
+      }
+      isMarquee = false;
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  });
+
   // Render Tracks & Clips
   function render() {
     drawRuler();
@@ -218,6 +323,7 @@ export function setupTimelineView(timelineEngine) {
 
     headersContainer.innerHTML = '';
     tracksContainer.innerHTML = '';
+    tracksContainer.appendChild(marqueeEl);
 
     const totalDuration = timelineEngine.calculateTotalDuration();
     const minWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 400);
@@ -262,7 +368,10 @@ export function setupTimelineView(timelineEngine) {
       // Render Clips in this track
       track.clips.forEach((clip) => {
         const clipEl = document.createElement('div');
-        clipEl.className = `timeline-clip ${clip.type}-clip ${clip.id === timelineEngine.selectedClipId ? 'selected' : ''}`;
+        const isSelected = timelineEngine.isClipSelected(clip.id) || clip.id === timelineEngine.selectedClipId;
+        const isMulti = timelineEngine.selectedClipIds && timelineEngine.selectedClipIds.size > 1 && isSelected;
+        clipEl.className = `timeline-clip ${clip.type}-clip ${isSelected ? 'selected' : ''} ${isMulti ? 'multi-selected' : ''}`;
+        clipEl.dataset.clipId = clip.id;
         
         const left = clip.start * pxPerSecond;
         const width = Math.max(20, clip.duration * pxPerSecond);
@@ -276,10 +385,21 @@ export function setupTimelineView(timelineEngine) {
           <div class="trim-handle trim-right" data-edge="right"></div>
         `;
 
-        // Select clip on click
+        // Select clip on click (supports Shift / Ctrl multi-selection)
         clipEl.addEventListener('mousedown', (e) => {
-          if (e.target.classList.contains('trim-handle')) return; // let handle deal with it
-          timelineEngine.selectClip(clip.id);
+          if (e.target.classList.contains('trim-handle')) return;
+          e.stopPropagation();
+
+          const isShiftOrCtrl = e.shiftKey || e.ctrlKey || e.metaKey;
+          if (isShiftOrCtrl) {
+            timelineEngine.selectClip(clip.id, true);
+            render();
+          } else {
+            if (!timelineEngine.isClipSelected(clip.id)) {
+              timelineEngine.selectClip(clip.id, false);
+              render();
+            }
+          }
           startDraggingClip(clip, e);
         });
 
@@ -304,17 +424,49 @@ export function setupTimelineView(timelineEngine) {
     });
   }
 
-  // Clip Drag & Move Handler
+  // Clip Drag & Move Handler (Supports Moving Single or Multiple Grouped Clips)
   function startDraggingClip(clip, startEvent) {
-    timelineEngine.pushState(`Mover ${clip.name}`);
+    const isMulti = timelineEngine.isClipSelected(clip.id) && timelineEngine.selectedClipIds.size > 1;
+    const movingClips = isMulti ? timelineEngine.getSelectedClips() : [clip];
+
+    timelineEngine.pushState(`Mover ${movingClips.length > 1 ? movingClips.length + ' clips' : clip.name}`);
     const startX = startEvent.clientX;
-    const initialStart = clip.start;
+
+    const initialStarts = new Map();
+    let minStart = Infinity;
+    for (const c of movingClips) {
+      initialStarts.set(c.id, c.start);
+      if (c.start < minStart) minStart = c.start;
+    }
+
     audioEngine.playBeep(420, 'square', 0.04);
 
     const onMouseMove = (e) => {
       const deltaX = e.clientX - startX;
-      const deltaSeconds = deltaX / pxPerSecond;
-      timelineEngine.moveClip(clip.id, initialStart + deltaSeconds);
+      let deltaSeconds = deltaX / pxPerSecond;
+
+      // Prevent dragging before 0:00
+      if (minStart + deltaSeconds < 0) {
+        deltaSeconds = -minStart;
+      }
+
+      // Magnetic snapping based on primary dragged clip
+      if (timelineEngine.isSnapping) {
+        const targetDraggedStart = initialStarts.get(clip.id) + deltaSeconds;
+        const snappedStart = timelineEngine.applySnapping(clip.id, targetDraggedStart, clip.duration);
+        deltaSeconds += (snappedStart - targetDraggedStart);
+        if (minStart + deltaSeconds < 0) {
+          deltaSeconds = -minStart;
+        }
+      }
+
+      for (const c of movingClips) {
+        const init = initialStarts.get(c.id);
+        c.start = Math.max(0, init + deltaSeconds);
+      }
+
+      timelineEngine.calculateTotalDuration();
+      timelineEngine.notify('trackschange');
       render();
     };
 

@@ -15,6 +15,7 @@ export class TimelineEngine {
     this.isLooping = false;
     this.totalDuration = 15; // default seconds, expands dynamically
     this.selectedClipId = null;
+    this.selectedClipIds = new Set();
     this.snapThresholdSeconds = 0.2;
     this.isSnapping = true;
 
@@ -55,6 +56,7 @@ export class TimelineEngine {
       action,
       currentTime: this.currentTime,
       selectedClipId: this.selectedClipId,
+      selectedClipIds: Array.from(this.selectedClipIds),
       tracks: this.tracks.map(t => ({
         ...t,
         clips: t.clips.map(c => ({
@@ -129,13 +131,17 @@ export class TimelineEngine {
     }));
     this.currentTime = state.currentTime !== undefined ? state.currentTime : this.currentTime;
     this.selectedClipId = state.selectedClipId;
+    this.selectedClipIds = new Set(state.selectedClipIds || (state.selectedClipId ? [state.selectedClipId] : []));
 
     this.calculateTotalDuration();
     this.syncAudioPlayback();
     this.syncVideoMediaElements();
     this.notify('trackschange', { tracks: this.tracks });
     this.notify('timeupdate', { currentTime: this.currentTime });
-    this.notify('clipselected', { clip: this.getSelectedClip() });
+    this.notify('clipselected', { 
+      clip: this.getSelectedClip(),
+      selectedClipIds: Array.from(this.selectedClipIds)
+    });
   }
 
   canUndo() {
@@ -176,6 +182,23 @@ export class TimelineEngine {
           this.currentTime = maxDur;
           this.pause();
           return;
+        }
+      }
+
+      // Smooth audio transition across clips during playback
+      for (const track of this.tracks) {
+        if (!track.muted) {
+          for (const clip of track.clips) {
+            if (clip.audioBuffer && !clip.isMuted) {
+              const isActive = this.currentTime >= clip.start && this.currentTime < (clip.start + clip.duration);
+              const isPlaying = audioEngine.activeSources.has(clip.id);
+              if (isActive && !isPlaying) {
+                audioEngine.playClipAudio(clip, this.currentTime);
+              } else if (!isActive && isPlaying) {
+                audioEngine.stopClipAudio(clip.id);
+              }
+            }
+          }
         }
       }
 
@@ -253,48 +276,70 @@ export class TimelineEngine {
 
   /**
    * Synchronizes native HTMLVideoElement audio & playback with the timeline.
-   * Guarantees original video audio plays seamlessly without delay.
+   * Groups by distinct video element to eliminate play/pause thrashing and buffer stalls when clips are cut.
    */
   syncVideoMediaElements() {
+    const videoStates = new Map();
+
     for (const track of this.tracks) {
       if (track.type === 'video') {
         for (const clip of track.clips) {
           if (clip.mediaElement && clip.mediaElement.tagName === 'VIDEO') {
             const video = clip.mediaElement;
+            if (!videoStates.has(video)) {
+              videoStates.set(video, { activeClip: null, trackMuted: track.hidden || track.muted });
+            }
             const clipStart = clip.start;
             const clipEnd = clip.start + clip.duration;
-            const isActive = this.currentTime >= clipStart && this.currentTime < clipEnd;
-
-            // If an audio clip exists on A1 for this video, mute the video element to avoid doubling
-            const hasDedicatedAudioClip = this.tracks.some(t => 
-              t.type === 'audio' && !t.muted && t.clips.some(c => c.sourceVideoClipId === clip.id && !c.isMuted)
-            );
-
-            const isMuted = track.muted || clip.isMuted || hasDedicatedAudioClip;
-            video.muted = isMuted;
-            video.volume = Math.max(0, Math.min(1, (clip.volume !== undefined ? clip.volume : 1.0)));
-
-            if (this.isPlaying && isActive) {
-              const targetTime = (clip.trimIn || 0) + ((this.currentTime - clipStart) * (clip.speed || 1.0));
-              if (Math.abs(video.currentTime - targetTime) > 0.3) {
-                video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
-              }
-              video.playbackRate = clip.speed || 1.0;
-              if (video.paused) {
-                video.play().catch(() => {});
-              }
-            } else {
-              if (!video.paused) {
-                video.pause();
-              }
-              if (isActive) {
-                const targetTime = (clip.trimIn || 0) + ((this.currentTime - clipStart) * (clip.speed || 1.0));
-                if (Math.abs(video.currentTime - targetTime) > 0.2) {
-                  video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
-                }
-              }
+            if (this.currentTime >= clipStart && this.currentTime < clipEnd) {
+              videoStates.set(video, { 
+                activeClip: clip, 
+                trackMuted: track.hidden || track.muted 
+              });
             }
           }
+        }
+      }
+    }
+
+    for (const [video, state] of videoStates.entries()) {
+      const clip = state.activeClip;
+      if (clip) {
+        const clipStart = clip.start;
+        const targetTime = (clip.trimIn || 0) + ((this.currentTime - clipStart) * (clip.speed || 1.0));
+        const speed = clip.speed || 1.0;
+
+        const hasDedicatedAudioClip = this.tracks.some(t => 
+          t.type === 'audio' && !t.muted && t.clips.some(c => (c.sourceVideoClipId === clip.id || c.sourceVideoClipId === clip.sourceVideoClipId) && !c.isMuted)
+        );
+        const isMuted = state.trackMuted || clip.isMuted || hasDedicatedAudioClip;
+        video.muted = isMuted;
+        video.volume = Math.max(0, Math.min(1, (clip.volume !== undefined ? clip.volume : 1.0)));
+
+        if (video.playbackRate !== speed) {
+          video.playbackRate = speed;
+        }
+
+        if (this.isPlaying) {
+          const drift = Math.abs(video.currentTime - targetTime);
+          if (drift > 0.3) {
+            video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
+          }
+          if (video.paused) {
+            video.play().catch(() => {});
+          }
+        } else {
+          if (!video.paused) {
+            video.pause();
+          }
+          const drift = Math.abs(video.currentTime - targetTime);
+          if (drift > 0.05) {
+            video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
+          }
+        }
+      } else {
+        if (!video.paused) {
+          video.pause();
         }
       }
     }
@@ -345,9 +390,62 @@ export class TimelineEngine {
     return newClip;
   }
 
-  selectClip(clipId) {
-    this.selectedClipId = clipId;
-    this.notify('clipselected', { clip: this.getSelectedClip() });
+  selectClip(clipId, multi = false) {
+    if (!multi) {
+      this.selectedClipIds.clear();
+      if (clipId) {
+        this.selectedClipIds.add(clipId);
+      }
+      this.selectedClipId = clipId;
+    } else {
+      if (clipId) {
+        if (this.selectedClipIds.has(clipId)) {
+          this.selectedClipIds.delete(clipId);
+          this.selectedClipId = this.selectedClipIds.size > 0 ? Array.from(this.selectedClipIds)[this.selectedClipIds.size - 1] : null;
+        } else {
+          this.selectedClipIds.add(clipId);
+          this.selectedClipId = clipId;
+        }
+      }
+    }
+    this.notify('clipselected', { 
+      clip: this.getSelectedClip(),
+      selectedClipIds: Array.from(this.selectedClipIds)
+    });
+  }
+
+  selectClips(clipIds) {
+    this.selectedClipIds = new Set(clipIds);
+    this.selectedClipId = clipIds.length > 0 ? clipIds[clipIds.length - 1] : null;
+    this.notify('clipselected', { 
+      clip: this.getSelectedClip(),
+      selectedClipIds: Array.from(this.selectedClipIds)
+    });
+  }
+
+  clearSelection() {
+    this.selectedClipIds.clear();
+    this.selectedClipId = null;
+    this.notify('clipselected', { 
+      clip: null,
+      selectedClipIds: [] 
+    });
+  }
+
+  isClipSelected(clipId) {
+    return this.selectedClipIds.has(clipId);
+  }
+
+  getSelectedClips() {
+    const clips = [];
+    for (const track of this.tracks) {
+      for (const clip of track.clips) {
+        if (this.selectedClipIds.has(clip.id)) {
+          clips.push(clip);
+        }
+      }
+    }
+    return clips;
   }
 
   getSelectedClip() {
@@ -400,52 +498,93 @@ export class TimelineEngine {
       }
     }
 
+    // Split any linked audio clip on track A1
+    for (const track of this.tracks) {
+      if (track.type === 'audio') {
+        const linkedAudio = track.clips.find(c => 
+          c.sourceVideoClipId === clip.id && 
+          splitTime > c.start + 0.05 && 
+          splitTime < c.start + c.duration - 0.05
+        );
+        if (linkedAudio) {
+          const audioFirstDur = splitTime - linkedAudio.start;
+          const audioSecondDur = linkedAudio.duration - audioFirstDur;
+          linkedAudio.duration = audioFirstDur;
+          const secondAudio = {
+            ...linkedAudio,
+            id: 'clip_' + Math.random().toString(36).substr(2, 9),
+            sourceVideoClipId: secondClip.id,
+            name: linkedAudio.name + ' (2)',
+            start: splitTime,
+            duration: audioSecondDur,
+            trimIn: (linkedAudio.trimIn || 0) + (audioFirstDur * (linkedAudio.speed || 1.0))
+          };
+          const aIdx = track.clips.findIndex(c => c.id === linkedAudio.id);
+          if (aIdx !== -1) {
+            track.clips.splice(aIdx + 1, 0, secondAudio);
+          }
+        }
+      }
+    }
+
     this.selectClip(secondClip.id);
     this.notify('trackschange', { tracks: this.tracks });
     audioEngine.playBeep(600, 'square', 0.08); // retro cut sound
     return true;
   }
 
-  // Delete clip
+  // Delete clip(s) - Supports Multi-Selection / Grouped Deletion
   deleteSelectedClip() {
-    if (!this.selectedClipId) return false;
+    const idsToDelete = (this.selectedClipIds && this.selectedClipIds.size > 0)
+      ? Array.from(this.selectedClipIds)
+      : (this.selectedClipId ? [this.selectedClipId] : []);
+
+    if (idsToDelete.length === 0) return false;
+
+    this.pushState(`Borrar ${idsToDelete.length > 1 ? idsToDelete.length + ' clips' : 'Clip'}`);
+
     for (const track of this.tracks) {
-      const idx = track.clips.findIndex(c => c.id === this.selectedClipId);
-      if (idx !== -1) {
-        this.pushState('Borrar Clip');
-        track.clips.splice(idx, 1);
-        this.selectedClipId = null;
-        this.notify('clipselected', { clip: null });
-        this.notify('trackschange', { tracks: this.tracks });
-        audioEngine.playBeep(220, 'sawtooth', 0.1);
-        return true;
-      }
+      track.clips = track.clips.filter(c => !idsToDelete.includes(c.id));
     }
-    return false;
+
+    this.clearSelection();
+    this.calculateTotalDuration();
+    this.notify('clipselected', { clip: null, selectedClipIds: [] });
+    this.notify('trackschange', { tracks: this.tracks });
+    audioEngine.playBeep(220, 'sawtooth', 0.1);
+    return true;
   }
 
-  // Duplicate clip
+  // Duplicate clip(s) - Supports Multi-Selection / Grouped Duplication
   duplicateSelectedClip() {
-    const clip = this.getSelectedClip();
-    if (!clip) return false;
+    const clipsToDup = this.getSelectedClips();
+    if (clipsToDup.length === 0) {
+      const single = this.getSelectedClip();
+      if (single) clipsToDup.push(single);
+    }
+    if (clipsToDup.length === 0) return false;
 
-    this.pushState('Duplicar Clip');
+    this.pushState(`Duplicar ${clipsToDup.length > 1 ? clipsToDup.length + ' clips' : 'Clip'}`);
 
-    const dup = {
-      ...clip,
-      id: 'clip_' + Math.random().toString(36).substr(2, 9),
-      name: clip.name + ' (COPIA)',
-      start: clip.start + clip.duration + 0.1
-    };
+    const newSelectedIds = [];
+    for (const clip of clipsToDup) {
+      const dup = {
+        ...clip,
+        id: 'clip_' + Math.random().toString(36).substr(2, 9),
+        name: clip.name + ' (COPIA)',
+        start: clip.start + clip.duration + 0.1
+      };
 
-    for (const track of this.tracks) {
-      if (track.clips.some(c => c.id === clip.id)) {
-        track.clips.push(dup);
-        break;
+      for (const track of this.tracks) {
+        if (track.clips.some(c => c.id === clip.id)) {
+          track.clips.push(dup);
+          newSelectedIds.push(dup.id);
+          break;
+        }
       }
     }
 
-    this.selectClip(dup.id);
+    this.selectClips(newSelectedIds);
     this.calculateTotalDuration();
     this.notify('trackschange', { tracks: this.tracks });
     audioEngine.playBeep(520, 'square', 0.08);

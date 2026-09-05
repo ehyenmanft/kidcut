@@ -1002,6 +1002,36 @@ body.crt-active .crt-lines {
   box-shadow: 0 0 6px var(--color-gold), 2px 2px 0 #000;
 }
 
+.timeline-clip.multi-selected {
+  border-color: var(--color-cyan);
+  box-shadow: 0 0 10px var(--color-cyan), 2px 2px 0 #000;
+}
+
+.timeline-clip.multi-selected::after {
+  content: '★ GRUPO';
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  font-size: 7px;
+  color: var(--color-cyan);
+  font-weight: bold;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* RETRO TIMELINE MARQUEE / BOX SELECTION */
+.timeline-marquee {
+  position: absolute;
+  border: 2px dashed var(--color-cyan);
+  background: rgba(0, 240, 255, 0.2);
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.5);
+  pointer-events: none;
+  z-index: 50;
+  display: none;
+}
+
 .timeline-clip.video-clip {
   background: linear-gradient(90deg, #372870, #4c379a);
   border-left: 4px solid var(--color-cyan);
