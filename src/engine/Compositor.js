@@ -175,9 +175,13 @@ export class Compositor {
     const speed = clip.speed || 1.0;
     const targetVideoTime = trimIn + ((currentTime - clipStart) * speed);
 
-    // Keep video element synced
-    if (Math.abs(video.currentTime - targetVideoTime) > 0.08) {
+    // Smooth video synchronization: only seek if drift exceeds 0.25s
+    const drift = Math.abs(video.currentTime - targetVideoTime);
+    if (drift > 0.25) {
       video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
+    }
+    if (video.playbackRate !== speed) {
+      video.playbackRate = speed;
     }
 
     const vw = video.videoWidth || targetW;

@@ -115,6 +115,7 @@ namespace KidCut
                 byte[] fileBytes = File.ReadAllBytes(filePath);
                 context.Response.ContentType = GetMimeType(filePath);
                 context.Response.ContentLength64 = fileBytes.Length;
+                context.Response.AddHeader("Cache-Control", "public, max-age=31536000");
                 context.Response.OutputStream.Write(fileBytes, 0, fileBytes.Length);
                 context.Response.OutputStream.Close();
             }
@@ -175,7 +176,7 @@ namespace KidCut
             if (!string.IsNullOrEmpty(browserPath))
             {
                 string tempUserDir = Path.Combine(Path.GetTempPath(), "KidCut_App_Profile");
-                string args = string.Format("--app=\"{0}\" --window-size=1300,850 --user-data-dir=\"{1}\" --enable-gpu-rasterization --disable-features=Translate", url, tempUserDir);
+                string args = string.Format("--app=\"{0}\" --window-size=1300,850 --user-data-dir=\"{1}\" --enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --disable-background-timer-throttling --disable-renderer-backgrounding --disable-features=Translate", url, tempUserDir);
 
                 ProcessStartInfo psi = new ProcessStartInfo(browserPath, args)
                 {
