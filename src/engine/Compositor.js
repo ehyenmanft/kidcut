@@ -19,6 +19,7 @@ export class Compositor {
     this.aspectRatioKey = '16:9';
     this.baseWidth = 1920;
     this.baseHeight = 1080;
+    this.isExporting = false;
     this.updateDimensions();
   }
 
@@ -175,10 +176,18 @@ export class Compositor {
     const speed = clip.speed || 1.0;
     const targetVideoTime = trimIn + ((currentTime - clipStart) * speed);
 
-    // Smooth video synchronization: only seek if drift exceeds 0.25s
-    const drift = Math.abs(video.currentTime - targetVideoTime);
-    if (drift > 0.25) {
-      video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
+    if (this.isExporting) {
+      // Offline export: exact time alignment without 0.25s throttling
+      const clampedTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
+      if (Math.abs(video.currentTime - clampedTime) > 0.001) {
+        video.currentTime = clampedTime;
+      }
+    } else {
+      // Smooth video synchronization during realtime playback: only seek if drift exceeds 0.25s
+      const drift = Math.abs(video.currentTime - targetVideoTime);
+      if (drift > 0.25) {
+        video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
+      }
     }
     if (video.playbackRate !== speed) {
       video.playbackRate = speed;

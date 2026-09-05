@@ -113,46 +113,68 @@ export function setupTimelineView(timelineEngine) {
     timelineEngine.addTrack('audio');
   });
 
-  // Draw Ruler
+  // Draw Ruler (Accurate, dynamic scaling without overlapping text)
   function drawRuler() {
     const totalDuration = timelineEngine.calculateTotalDuration();
-    const rulerWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 200);
+    const timelineWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 400);
     
-    rulerCanvas.width = rulerWidth;
+    rulerCanvas.width = timelineWidth;
     rulerCanvas.height = 28;
+    rulerCanvas.style.width = `${timelineWidth}px`;
+    rulerCanvas.style.height = '28px';
+
+    const rulerHeader = document.getElementById('timeline-ruler');
+    if (rulerHeader) {
+      rulerHeader.style.width = `${timelineWidth}px`;
+    }
+
     const ctx = rulerCanvas.getContext('2d');
-
     ctx.fillStyle = '#0b0817';
-    ctx.fillRect(0, 0, rulerWidth, 28);
+    ctx.fillRect(0, 0, timelineWidth, 28);
 
-    ctx.fillStyle = '#65549e';
-    ctx.font = '9px monospace';
-    ctx.strokeStyle = '#332759';
+    // Determine optimal interval so labels never overlap (minimum 75px between timecodes)
+    const minLabelDist = 75;
+    const standardIntervals = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    const stepSec = standardIntervals.find(i => i * pxPerSecond >= minLabelDist) || 60;
+    const subDivisions = stepSec >= 5 ? 5 : (stepSec >= 1 ? 4 : 2);
+    const subStep = stepSec / subDivisions;
+
+    const maxSeconds = Math.ceil(timelineWidth / pxPerSecond);
+
+    // 1. Minor sub-ticks
+    ctx.strokeStyle = '#2d224e';
     ctx.lineWidth = 1;
-
-    const step = pxPerSecond < 50 ? 2 : 1; // 1 or 2 seconds tick marks
-    for (let sec = 0; sec <= totalDuration + 2; sec += step) {
-      const x = sec * pxPerSecond;
-      
-      // Major second mark
+    for (let t = 0; t <= maxSeconds; t += subStep) {
+      const x = Math.round(t * pxPerSecond);
       ctx.beginPath();
-      ctx.moveTo(x, 14);
+      ctx.moveTo(x, 18);
+      ctx.lineTo(x, 28);
+      ctx.stroke();
+    }
+
+    // 2. Major tick marks and clear, truthful timecode labels
+    ctx.font = 'bold 9px "Segoe UI", -apple-system, sans-serif';
+    for (let t = 0; t <= maxSeconds; t += stepSec) {
+      const x = Math.round(t * pxPerSecond);
+
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 12);
       ctx.lineTo(x, 28);
       ctx.stroke();
 
-      const mins = Math.floor(sec / 60);
-      const s = sec % 60;
-      const label = `${String(mins).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-      ctx.fillText(label, x + 3, 11);
+      const totalSec = Math.round(t * 100) / 100;
+      const mins = Math.floor(totalSec / 60);
+      const secs = Math.floor(totalSec % 60);
+      const frac = Math.round((totalSec - Math.floor(totalSec)) * 10);
+      
+      const label = (stepSec < 1)
+        ? `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${frac}`
+        : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
-      // Sub-second ticks
-      for (let sub = 1; sub < 4; sub++) {
-        const subX = x + (sub * (pxPerSecond / 4));
-        ctx.beginPath();
-        ctx.moveTo(subX, 20);
-        ctx.lineTo(subX, 28);
-        ctx.stroke();
-      }
+      ctx.fillStyle = '#00f0ff';
+      ctx.fillText(label, x + 4, 11);
     }
   }
 
@@ -198,7 +220,7 @@ export function setupTimelineView(timelineEngine) {
     tracksContainer.innerHTML = '';
 
     const totalDuration = timelineEngine.calculateTotalDuration();
-    const minWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 300);
+    const minWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 400);
     tracksContainer.style.width = `${minWidth}px`;
 
     timelineEngine.tracks.forEach((track) => {
