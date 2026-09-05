@@ -1,0 +1,20 @@
+{
+  "name": "kidcut",
+  "version": "1.0.0",
+  "description": "8-Bit Retro Pixel Video Editor for Windows & Web",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron electron/main.cjs",
+    "start": "vite --open"
+  },
+  "keywords": ["video-editor", "8-bit", "pixel-art", "retro", "capcut", "chiptune"],
+  "author": "KidCut Studios",
+  "license": "MIT",
+  "devDependencies": {
+    "vite": "^5.4.2"
+  }
+}

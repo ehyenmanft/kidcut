@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KidCut - 8-Bit Pixel Video Studio</title>
+  <link rel="icon" type="image/png" href="/icon.png" />
+  
+  <!-- Retro Pixel Typography from Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen:wght@400;700&family=VT323&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body class="pixel-theme crt-active">
+  <!-- CRT Monitor Scanline Overlay -->
+  <div id="crt-overlay" class="crt-lines"></div>
+
+  <!-- Splash Screen / Retro Boot Screen -->
+  <div id="splash-screen" class="splash-container">
+    <div class="splash-box">
+      <div class="splash-logo-wrap">
+        <img src="/logo.png" alt="KidCut 8-Bit Logo" class="splash-logo pixel-art" />
+      </div>
+      <div class="splash-title">KIDCUT</div>
+      <div class="splash-subtitle">★ 8-BIT RETRO VIDEO STUDIO ★</div>
+      
+      <div class="splash-progress-container">
+        <div class="pixel-bar-outer">
+          <div id="splash-progress-bar" class="pixel-bar-inner"></div>
+        </div>
+        <div id="splash-status-text" class="splash-status">CARGANDO RECURSOS RETRO... 0%</div>
+      </div>
+
+      <div class="splash-console" id="splash-console">
+        <div>> BOOTING RETRO CANVAS ENGINE... [OK]</div>
+        <div>> INITIALIZING CHIPTUNE SYNTH... [OK]</div>
+        <div>> ALLOCATING MULTI-TRACK MEMORY... [OK]</div>
+      </div>
+
+      <button id="splash-start-btn" class="pixel-btn arcade-gold pulse-btn hidden">
+        INSERT COIN / PRESS START
+      </button>
+      
+      <div class="splash-footer">v1.0.0 • OPTIMIZADO PARA BAJO CONSUMO DE RAM & CPU</div>
+    </div>
+  </div>
+
+  <!-- Main App Desktop Shell -->
+  <div id="app" class="app-layout">
+    
+    <!-- Top Header Bar -->
+    <header id="header-bar" class="header-bar">
+      <div class="header-brand">
+        <img src="/logo.png" alt="Logo" class="header-logo pixel-art" />
+        <span class="header-title">KIDCUT</span>
+        <span class="header-badge">8-BIT PRO</span>
+      </div>
+
+      <!-- Center Controls: Aspect Ratio & Canvas Presets -->
+      <div class="header-center">
+        <div class="ratio-selector-group">
+          <span class="ratio-label">ASPECT RATIO:</span>
+          <button class="pixel-tab-btn active" data-ratio="16:9">16:9 <span>YT</span></button>
+          <button class="pixel-tab-btn" data-ratio="9:16">9:16 <span>REELS</span></button>
+          <button class="pixel-tab-btn" data-ratio="1:1">1:1 <span>SQUARE</span></button>
+          <button class="pixel-tab-btn" data-ratio="4:5">4:5 <span>FEED</span></button>
+        </div>
+      </div>
+
+      <!-- Right Actions: CRT Toggle, Undo/Redo, Export -->
+      <div class="header-actions">
+        <button id="btn-toggle-crt" class="pixel-btn btn-sm btn-crt active" title="Alternar efecto CRT / Scanlines">
+          📺 CRT: ON
+        </button>
+        <button id="btn-sfx-toggle" class="pixel-btn btn-sm btn-sound" title="Sonidos Chiptune de Interfaz">
+          🔊 SFX: ON
+        </button>
+        <button id="btn-export-modal" class="pixel-btn arcade-gold btn-export">
+          💾 EXPORTAR VIDEO
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace (Panels Layout) -->
+    <main class="editor-workspace">
+      
+      <!-- Left Panel: Media Bin, Text, Stickers, Chiptune SFX, Filters -->
+      <aside id="left-panel" class="left-panel">
+        <!-- Vertical Tab Icons -->
+        <nav class="resource-nav">
+          <button class="nav-tab active" data-tab="media" title="Archivos locales">
+            <span class="tab-icon">📁</span>
+            <span class="tab-text">MEDIOS</span>
+          </button>
+          <button class="nav-tab" data-tab="text" title="Texto 8-Bits">
+            <span class="tab-icon">🔤</span>
+            <span class="tab-text">TEXTO</span>
+          </button>
+          <button class="nav-tab" data-tab="stickers" title="Stickers Pixel">
+            <span class="tab-icon">👾</span>
+            <span class="tab-text">STICKERS</span>
+          </button>
+          <button class="nav-tab" data-tab="chiptune" title="Sonidos Chiptune">
+            <span class="tab-icon">🎵</span>
+            <span class="tab-text">AUDIO 8B</span>
+          </button>
+          <button class="nav-tab" data-tab="fx" title="Filtros Retro">
+            <span class="tab-icon">✨</span>
+            <span class="tab-text">FILTROS</span>
+          </button>
+        </nav>
+
+        <!-- Tab Contents Container -->
+        <div class="resource-content-area" id="resource-content-area">
+          <!-- Dynamic Content rendered by AssetLibrary.js -->
+        </div>
+      </aside>
+
+      <!-- Center Panel: Video Preview Player -->
+      <section id="preview-panel" class="preview-panel">
+        <div class="canvas-viewport" id="canvas-viewport">
+          <div class="canvas-screen-frame" id="canvas-screen-frame">
+            <canvas id="main-preview-canvas"></canvas>
+            <div id="canvas-selection-box" class="selection-box hidden"></div>
+          </div>
+        </div>
+
+        <!-- Playback Controller Bar -->
+        <div class="preview-controls-bar">
+          <div class="timecode-display" id="timecode-display">00:00:00:00</div>
+          
+          <div class="playback-buttons">
+            <button id="btn-jump-start" class="pixel-ctrl-btn" title="Ir al Inicio (Home)">⏮</button>
+            <button id="btn-step-back" class="pixel-ctrl-btn" title="Fotograma Anterior (J)">⏪</button>
+            <button id="btn-play-pause" class="pixel-ctrl-btn btn-play" title="Reproducir / Pausar (Espacio)">▶</button>
+            <button id="btn-step-fwd" class="pixel-ctrl-btn" title="Fotograma Siguiente (L)">⏩</button>
+            <button id="btn-loop" class="pixel-ctrl-btn" title="Repetir Bucle">🔁</button>
+          </div>
+
+          <div class="zoom-and-fps">
+            <span class="fps-badge">30 FPS</span>
+            <div class="timeline-zoom-controls">
+              <button id="btn-zoom-out" class="pixel-zoom-btn" title="Reducir Zoom">-</button>
+              <span id="zoom-level-label">100%</span>
+              <button id="btn-zoom-in" class="pixel-zoom-btn" title="Aumentar Zoom">+</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel: Inspector & Properties -->
+      <aside id="right-panel" class="right-panel">
+        <div class="panel-header">
+          <span class="panel-title">PROPIEDADES</span>
+          <span id="selected-clip-badge" class="clip-type-badge">NINGUNO</span>
+        </div>
+        <div class="inspector-scroll" id="inspector-content">
+          <!-- Rendered dynamically by InspectorView.js -->
+          <div class="empty-inspector-msg">
+            <div class="pixel-ghost">👾</div>
+            <p>SELECCIONA UN CLIP EN LA LÍNEA DE TIEMPO PARA EDITARLO</p>
+          </div>
+        </div>
+      </aside>
+
+    </main>
+
+    <!-- Bottom Multi-Track Timeline (CapCut style) -->
+    <section id="timeline-container" class="timeline-container">
+      <!-- Timeline Header Toolbar -->
+      <div class="timeline-toolbar">
+        <div class="timeline-tools-left">
+          <button id="btn-tool-split" class="pixel-tool-btn" title="Dividir / Cortar clip en cabezal (Ctrl+B)">
+            ✂️ CORTAR (B)
+          </button>
+          <button id="btn-tool-delete" class="pixel-tool-btn btn-danger" title="Eliminar seleccionado (Supr)">
+            🗑️ BORRAR
+          </button>
+          <button id="btn-tool-duplicate" class="pixel-tool-btn" title="Duplicar seleccionado (Ctrl+D)">
+            📑 DUPLICAR
+          </button>
+          <div class="toolbar-sep"></div>
+          <button id="btn-add-video-track" class="pixel-tool-btn" title="Agregar Pista de Video">+ VISTA (V)</button>
+          <button id="btn-add-audio-track" class="pixel-tool-btn" title="Agregar Pista de Audio">+ AUDIO (A)</button>
+        </div>
+
+        <div class="timeline-tools-right">
+          <label class="snap-toggle-label">
+            <input type="checkbox" id="chk-snap" checked />
+            <span>🧲 SNAP MAGNÉTICO</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Timeline Scrollable Tracks Workspace -->
+      <div class="timeline-body-wrapper" id="timeline-body-wrapper">
+        
+        <!-- Left Tracks Headers (V2, V1, A1, A2...) -->
+        <div class="timeline-track-headers" id="timeline-track-headers">
+          <!-- Dynamically populated -->
+        </div>
+
+        <!-- Right Tracks Canvas / Grid with Playhead -->
+        <div class="timeline-ruler-and-tracks" id="timeline-scroll-area">
+          <!-- Time Ruler (seconds and frames) -->
+          <div class="timeline-ruler" id="timeline-ruler">
+            <canvas id="ruler-canvas"></canvas>
+          </div>
+
+          <!-- Tracks Container -->
+          <div class="tracks-content" id="tracks-content">
+            <!-- Dynamic Track rows -->
+          </div>
+
+          <!-- Draggable Red Playhead Line -->
+          <div class="timeline-playhead" id="timeline-playhead">
+            <div class="playhead-handle">▼</div>
+            <div class="playhead-line"></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Export Modal -->
+  <div id="export-modal" class="modal-overlay hidden">
+    <div class="modal-box pixel-box">
+      <div class="modal-header">
+        <span class="modal-title">💾 EXPORTAR VIDEO EN ALTA DEFINICIÓN</span>
+        <button id="btn-close-export" class="modal-close-btn">✖</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="export-setting-row">
+          <label>RESOLUCIÓN:</label>
+          <div class="pixel-radio-group" id="export-resolution-group">
+            <button class="pixel-opt-btn active" data-res="1080">1080p FHD (1920x1080)</button>
+            <button class="pixel-opt-btn" data-res="720">720p HD (1280x720)</button>
+            <button class="pixel-opt-btn" data-res="480">480p SD (Rápido)</button>
+            <button class="pixel-opt-btn" data-res="4k">4K UHD (Ultra HD)</button>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>ASPECT RATIO DE EXPORTACIÓN:</label>
+          <div class="pixel-radio-group" id="export-ratio-group">
+            <button class="pixel-opt-btn active" data-ratio="16:9">16:9 (Horizontal)</button>
+            <button class="pixel-opt-btn" data-ratio="9:16">9:16 (Vertical TikTok/Reels)</button>
+            <button class="pixel-opt-btn" data-ratio="1:1">1:1 (Cuadrado)</button>
+            <button class="pixel-opt-btn" data-ratio="4:5">4:5 (Feed)</button>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>FORMATO DE SALIDA:</label>
+          <div class="pixel-radio-group" id="export-format-group">
+            <button class="pixel-opt-btn active" data-format="webm">WebM (Ultra Compatible / Máxima Nitidez)</button>
+            <button class="pixel-opt-btn" data-format="mp4">MP4 (Universal)</button>
+            <button class="pixel-opt-btn" data-format="gif">GIF Animado 8-Bit</button>
+            <button class="pixel-opt-btn" data-format="wav">Audio WAV (Solo Pista)</button>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>VELOCIDAD DE CUADROS (FPS):</label>
+          <div class="pixel-radio-group" id="export-fps-group">
+            <button class="pixel-opt-btn active" data-fps="30">30 FPS (Estándar)</button>
+            <button class="pixel-opt-btn" data-fps="60">60 FPS (Ultra Fluido)</button>
+          </div>
+        </div>
+
+        <!-- Render Progress Box (shown while exporting) -->
+        <div id="export-progress-wrap" class="export-progress-wrap hidden">
+          <div class="export-msg-status" id="export-msg-status">RENDERIZANDO FOTOGRAMAS DETERMINISTAS...</div>
+          <div class="pixel-bar-outer">
+            <div id="export-progress-bar" class="pixel-bar-inner"></div>
+          </div>
+          <div class="export-stats" id="export-stats">CUADRO 0 / 0 • ESTIMADO: CALCULANDO...</div>
+        </div>
+
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-cancel-export" class="pixel-btn btn-secondary">CANCELAR</button>
+        <button id="btn-start-export" class="pixel-btn arcade-gold">INICIAR RENDERIZADO</button>
+        <a id="download-anchor" class="hidden" download="kidcut_export.webm"></a>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

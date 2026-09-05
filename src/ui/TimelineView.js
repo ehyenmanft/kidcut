@@ -1,0 +1,292 @@
+/**
+ * KIDCUT TIMELINE VIEW
+ * Multi-track CapCut-style visual editor with drag, trim, playhead scrub and ruler.
+ */
+
+import { audioEngine } from '../engine/AudioEngine.js';
+
+export function setupTimelineView(timelineEngine) {
+  const headersContainer = document.getElementById('timeline-track-headers');
+  const tracksContainer = document.getElementById('tracks-content');
+  const rulerCanvas = document.getElementById('ruler-canvas');
+  const playhead = document.getElementById('timeline-playhead');
+  const scrollArea = document.getElementById('timeline-scroll-area');
+
+  let pxPerSecond = 80; // Zoom factor
+  const minPxPerSecond = 30;
+  const maxPxPerSecond = 240;
+
+  // Zoom controls
+  const zoomInBtn = document.getElementById('btn-zoom-in');
+  const zoomOutBtn = document.getElementById('btn-zoom-out');
+  const zoomLabel = document.getElementById('zoom-level-label');
+
+  function setZoom(val) {
+    pxPerSecond = Math.max(minPxPerSecond, Math.min(maxPxPerSecond, val));
+    const percent = Math.round((pxPerSecond / 80) * 100);
+    zoomLabel.textContent = `${percent}%`;
+    render();
+  }
+
+  zoomInBtn.addEventListener('click', () => {
+    setZoom(pxPerSecond * 1.25);
+    audioEngine.playBeep(500, 'square', 0.03);
+  });
+  zoomOutBtn.addEventListener('click', () => {
+    setZoom(pxPerSecond / 1.25);
+    audioEngine.playBeep(400, 'square', 0.03);
+  });
+
+  // Snapping checkbox
+  const snapCheck = document.getElementById('chk-snap');
+  snapCheck.addEventListener('change', (e) => {
+    timelineEngine.isSnapping = e.target.checked;
+  });
+
+  // Toolbar action buttons
+  document.getElementById('btn-tool-split').addEventListener('click', () => {
+    const success = timelineEngine.splitSelectedClip();
+    if (!success) {
+      alert('Coloca el cabezal rojo dentro de un clip seleccionado para dividirlo.');
+    }
+  });
+
+  document.getElementById('btn-tool-delete').addEventListener('click', () => {
+    timelineEngine.deleteSelectedClip();
+  });
+
+  document.getElementById('btn-tool-duplicate').addEventListener('click', () => {
+    timelineEngine.duplicateSelectedClip();
+  });
+
+  document.getElementById('btn-add-video-track').addEventListener('click', () => {
+    timelineEngine.addTrack('video');
+  });
+
+  document.getElementById('btn-add-audio-track').addEventListener('click', () => {
+    timelineEngine.addTrack('audio');
+  });
+
+  // Draw Ruler
+  function drawRuler() {
+    const totalDuration = timelineEngine.calculateTotalDuration();
+    const rulerWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 200);
+    
+    rulerCanvas.width = rulerWidth;
+    rulerCanvas.height = 28;
+    const ctx = rulerCanvas.getContext('2d');
+
+    ctx.fillStyle = '#0b0817';
+    ctx.fillRect(0, 0, rulerWidth, 28);
+
+    ctx.fillStyle = '#65549e';
+    ctx.font = '9px monospace';
+    ctx.strokeStyle = '#332759';
+    ctx.lineWidth = 1;
+
+    const step = pxPerSecond < 50 ? 2 : 1; // 1 or 2 seconds tick marks
+    for (let sec = 0; sec <= totalDuration + 2; sec += step) {
+      const x = sec * pxPerSecond;
+      
+      // Major second mark
+      ctx.beginPath();
+      ctx.moveTo(x, 14);
+      ctx.lineTo(x, 28);
+      ctx.stroke();
+
+      const mins = Math.floor(sec / 60);
+      const s = sec % 60;
+      const label = `${String(mins).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      ctx.fillText(label, x + 3, 11);
+
+      // Sub-second ticks
+      for (let sub = 1; sub < 4; sub++) {
+        const subX = x + (sub * (pxPerSecond / 4));
+        ctx.beginPath();
+        ctx.moveTo(subX, 20);
+        ctx.lineTo(subX, 28);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Update Playhead Position
+  function updatePlayhead() {
+    const x = timelineEngine.currentTime * pxPerSecond;
+    playhead.style.left = `${x}px`;
+  }
+
+  // Playhead scrubbing
+  let isScrubbing = false;
+  function handlePlayheadScrub(e) {
+    const rect = scrollArea.getBoundingClientRect();
+    const scrollLeft = scrollArea.scrollLeft;
+    const clickX = e.clientX - rect.left + scrollLeft;
+    const time = Math.max(0, clickX / pxPerSecond);
+    timelineEngine.seek(time);
+  }
+
+  rulerCanvas.addEventListener('mousedown', (e) => {
+    isScrubbing = true;
+    handlePlayheadScrub(e);
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (isScrubbing) {
+      handlePlayheadScrub(e);
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (isScrubbing) {
+      isScrubbing = false;
+    }
+  });
+
+  // Render Tracks & Clips
+  function render() {
+    drawRuler();
+    updatePlayhead();
+
+    headersContainer.innerHTML = '';
+    tracksContainer.innerHTML = '';
+
+    const totalDuration = timelineEngine.calculateTotalDuration();
+    const minWidth = Math.max(scrollArea.clientWidth, totalDuration * pxPerSecond + 300);
+    tracksContainer.style.width = `${minWidth}px`;
+
+    timelineEngine.tracks.forEach((track) => {
+      // 1. Header Item
+      const header = document.createElement('div');
+      header.className = `track-header-item ${track.type === 'audio' ? 'audio' : ''}`;
+      header.innerHTML = `
+        <span class="track-label">${track.name}</span>
+        <div class="track-btns">
+          ${track.type === 'video' ? `
+            <button class="track-icon-btn ${track.hidden ? 'active' : ''}" data-act="hide" title="Ocultar pista">👁</button>
+          ` : `
+            <button class="track-icon-btn ${track.muted ? 'active' : ''}" data-act="mute" title="Silenciar pista">🔇</button>
+          `}
+        </div>
+      `;
+
+      // Header buttons actions
+      header.querySelectorAll('.track-icon-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const act = btn.dataset.act;
+          if (act === 'hide') {
+            track.hidden = !track.hidden;
+          } else if (act === 'mute') {
+            track.muted = !track.muted;
+          }
+          timelineEngine.notify('trackschange');
+        });
+      });
+
+      headersContainer.appendChild(header);
+
+      // 2. Track Row
+      const row = document.createElement('div');
+      row.className = 'track-row';
+      row.dataset.trackId = track.id;
+
+      // Render Clips in this track
+      track.clips.forEach((clip) => {
+        const clipEl = document.createElement('div');
+        clipEl.className = `timeline-clip ${clip.type}-clip ${clip.id === timelineEngine.selectedClipId ? 'selected' : ''}`;
+        
+        const left = clip.start * pxPerSecond;
+        const width = Math.max(20, clip.duration * pxPerSecond);
+
+        clipEl.style.left = `${left}px`;
+        clipEl.style.width = `${width}px`;
+
+        clipEl.innerHTML = `
+          <div class="trim-handle trim-left" data-edge="left"></div>
+          <span class="clip-title">${clip.name}</span>
+          <div class="trim-handle trim-right" data-edge="right"></div>
+        `;
+
+        // Select clip on click
+        clipEl.addEventListener('mousedown', (e) => {
+          if (e.target.classList.contains('trim-handle')) return; // let handle deal with it
+          timelineEngine.selectClip(clip.id);
+          startDraggingClip(clip, e);
+        });
+
+        // Trim handle drag
+        const leftHandle = clipEl.querySelector('.trim-left');
+        const rightHandle = clipEl.querySelector('.trim-right');
+
+        leftHandle.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          startTrimmingClip(clip, 'left', e);
+        });
+
+        rightHandle.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          startTrimmingClip(clip, 'right', e);
+        });
+
+        row.appendChild(clipEl);
+      });
+
+      tracksContainer.appendChild(row);
+    });
+  }
+
+  // Clip Drag & Move Handler
+  function startDraggingClip(clip, startEvent) {
+    const startX = startEvent.clientX;
+    const initialStart = clip.start;
+    audioEngine.playBeep(420, 'square', 0.04);
+
+    const onMouseMove = (e) => {
+      const deltaX = e.clientX - startX;
+      const deltaSeconds = deltaX / pxPerSecond;
+      timelineEngine.moveClip(clip.id, initialStart + deltaSeconds);
+      render();
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
+  // Clip Trim In/Out Handler
+  function startTrimmingClip(clip, edge, startEvent) {
+    timelineEngine.selectClip(clip.id);
+    const startX = startEvent.clientX;
+
+    const onMouseMove = (e) => {
+      const deltaX = e.clientX - startX;
+      const deltaSeconds = deltaX / pxPerSecond;
+      timelineEngine.trimClip(clip.id, edge, deltaSeconds);
+      render();
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
+  // Engine subscriptions
+  timelineEngine.subscribe((event) => {
+    if (event === 'timeupdate') {
+      updatePlayhead();
+    } else if (event === 'trackschange' || event === 'clipselected') {
+      render();
+    }
+  });
+
+  render();
+}

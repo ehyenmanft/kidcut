@@ -1,0 +1,371 @@
+/**
+ * KIDCUT INSPECTOR VIEW
+ * Edit transformations, volume, speed, 100 retro filters, text animations & transitions.
+ */
+
+import { ALL_EFFECTS, RetroTransitions, TextAnimations } from '../engine/EffectsDatabase.js';
+
+export function setupInspectorView(timelineEngine) {
+  const container = document.getElementById('inspector-content');
+  const badge = document.getElementById('selected-clip-badge');
+
+  function renderInspector(clip) {
+    if (!clip) {
+      badge.textContent = 'NINGUNO';
+      container.innerHTML = `
+        <div class="empty-inspector-msg">
+          <div class="pixel-ghost">👾</div>
+          <p>SELECCIONA UN CLIP EN LA LÍNEA DE TIEMPO O EN PANTALLA PARA EDITARLO</p>
+        </div>
+      `;
+      return;
+    }
+
+    badge.textContent = clip.type.toUpperCase();
+
+    // Group 100 effects by category for select dropdown
+    let effectOptionsHtml = `<option value="none">-- SIN FILTRO --</option>`;
+    ALL_EFFECTS.forEach(fx => {
+      const isSelected = clip.filter === fx.id ? 'selected' : '';
+      effectOptionsHtml += `<option value="${fx.id}" ${isSelected}>${fx.icon} ${fx.name}</option>`;
+    });
+
+    // Text Animations dropdown
+    let textAnimOptionsHtml = '';
+    const anims = [
+      { id: 'none', label: '-- NINGUNA --' },
+      { id: 'arcade_blink', label: '✨ Arcade Blink' },
+      { id: 'typewriter', label: '⌨️ Typewriter Retro' },
+      { id: 'wave_float', label: '〰️ Wave Float' },
+      { id: 'glitch_shake', label: '⚡ Glitch Shake' },
+      { id: 'rainbow_cycle', label: '🌈 Rainbow Cycle' },
+      { id: 'pop_scale', label: '💥 Pop Bounce' }
+    ];
+    anims.forEach(a => {
+      const isSel = clip.textAnimation === a.id ? 'selected' : '';
+      textAnimOptionsHtml += `<option value="${a.id}" ${isSel}>${a.label}</option>`;
+    });
+
+    // Retro Transitions dropdown
+    let transOptionsHtml = '';
+    const trans = [
+      { id: 'none', label: '-- NINGUNA --' },
+      { id: 'pixel_dissolve', label: '🏁 Disolvencia Pixel' },
+      { id: 'wipe_horizontal', label: '↔️ Cortinilla H' },
+      { id: 'wipe_vertical', label: '↕️ Cortinilla V' },
+      { id: 'iris_circle', label: '⭕ Círculo Iris' },
+      { id: 'blinds', label: '📶 Persianas Pixel' },
+      { id: 'glitch_wipe', label: '⚡ Glitch Wipe' },
+      { id: 'tv_turnoff', label: '📺 TV Turn-Off' }
+    ];
+    trans.forEach(t => {
+      const isSel = clip.transition === t.id ? 'selected' : '';
+      transOptionsHtml += `<option value="${t.id}" ${isSel}>${t.label}</option>`;
+    });
+
+    container.innerHTML = `
+      <!-- General Properties -->
+      <div class="inspector-group">
+        <div class="group-title">INFORMACIÓN DEL CLIP</div>
+        <div class="prop-row">
+          <span>NOMBRE:</span>
+          <input type="text" id="prop-clip-name" class="prop-input" style="width: 140px; text-align: left;" value="${clip.name}" />
+        </div>
+        <div class="prop-row">
+          <span>INICIO:</span>
+          <span style="color: var(--color-gold); font-family: var(--font-digits); font-size: 16px;">${clip.start.toFixed(2)}s</span>
+        </div>
+        <div class="prop-row">
+          <span>DURACIÓN:</span>
+          <span style="color: var(--color-cyan); font-family: var(--font-digits); font-size: 16px;">${clip.duration.toFixed(2)}s</span>
+        </div>
+      </div>
+
+      <!-- Text Specific Properties -->
+      ${clip.type === 'text' ? `
+        <div class="inspector-group">
+          <div class="group-title">TEXTO Y ANIMACIÓN 8-BIT</div>
+          <div class="prop-row" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+            <span>CONTENIDO:</span>
+            <input type="text" id="prop-text-content" class="prop-input" style="width: 100%; text-align: left;" value="${clip.text || ''}" />
+          </div>
+          <div class="prop-row">
+            <span>ANIMACIÓN:</span>
+            <select id="prop-text-anim" class="prop-select" style="width: 150px;">
+              ${textAnimOptionsHtml}
+            </select>
+          </div>
+          <div class="prop-row">
+            <span>TAMAÑO:</span>
+            <input type="range" id="prop-font-size" class="prop-slider" min="16" max="140" value="${clip.fontSize || 48}" />
+            <span id="label-font-size" style="font-size: 8px;">${clip.fontSize || 48}px</span>
+          </div>
+          <div class="prop-row">
+            <span>COLOR:</span>
+            <input type="color" id="prop-text-color" value="${clip.textColor || '#ffd200'}" style="background: transparent; border: none; cursor: pointer;" />
+          </div>
+          <div class="prop-row">
+            <span>BORDE:</span>
+            <input type="color" id="prop-stroke-color" value="${clip.strokeColor || '#000000'}" style="background: transparent; border: none; cursor: pointer;" />
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Transform Controls (Visual Clips) -->
+      ${clip.type !== 'audio' ? `
+        <div class="inspector-group">
+          <div class="group-title">TRANSFORMACIÓN EN PANTALLA</div>
+          <div style="font-size: 7px; color: var(--color-cyan); margin-bottom: 6px;">★ Puedes mover y escalar arrastrando en la pantalla</div>
+          <div class="prop-row">
+            <span>POSICIÓN X:</span>
+            <input type="range" id="prop-pos-x" class="prop-slider" min="-0.2" max="1.2" step="0.01" value="${clip.x !== undefined ? clip.x : 0.5}" />
+            <span id="label-pos-x" style="font-size: 8px;">${Math.round((clip.x !== undefined ? clip.x : 0.5) * 100)}%</span>
+          </div>
+          <div class="prop-row">
+            <span>POSICIÓN Y:</span>
+            <input type="range" id="prop-pos-y" class="prop-slider" min="-0.2" max="1.2" step="0.01" value="${clip.y !== undefined ? clip.y : 0.5}" />
+            <span id="label-pos-y" style="font-size: 8px;">${Math.round((clip.y !== undefined ? clip.y : 0.5) * 100)}%</span>
+          </div>
+          <div class="prop-row">
+            <span>ESCALA:</span>
+            <input type="range" id="prop-scale" class="prop-slider" min="0.1" max="4.0" step="0.05" value="${clip.scale !== undefined ? clip.scale : 1.0}" />
+            <span id="label-scale" style="font-size: 8px;">${Math.round((clip.scale || 1.0) * 100)}%</span>
+          </div>
+          <div class="prop-row">
+            <span>ROTACIÓN:</span>
+            <input type="range" id="prop-rotation" class="prop-slider" min="-180" max="180" step="1" value="${clip.rotation || 0}" />
+            <span id="label-rotation" style="font-size: 8px;">${clip.rotation || 0}°</span>
+          </div>
+          <div class="prop-row">
+            <span>OPACIDAD:</span>
+            <input type="range" id="prop-opacity" class="prop-slider" min="0" max="1" step="0.05" value="${clip.opacity !== undefined ? clip.opacity : 1.0}" />
+            <span id="label-opacity" style="font-size: 8px;">${Math.round((clip.opacity !== undefined ? clip.opacity : 1.0) * 100)}%</span>
+          </div>
+        </div>
+
+        <!-- 100 Effects & Filters Selector -->
+        <div class="inspector-group">
+          <div class="group-title">FILTRO / EFECTO RETRO (100)</div>
+          <div class="prop-row" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+            <span>SELECCIONAR EFECTO:</span>
+            <select id="prop-filter-select" class="prop-select" style="width: 100%;">
+              ${effectOptionsHtml}
+            </select>
+          </div>
+          <div class="prop-row" id="row-filter-intensity" style="margin-top: 6px;">
+            <span>INTENSIDAD:</span>
+            <input type="range" id="prop-filter-intensity" class="prop-slider" min="5" max="100" value="${clip.filterIntensity || 50}" />
+            <span id="label-filter-intensity" style="font-size: 8px;">${clip.filterIntensity || 50}%</span>
+          </div>
+        </div>
+
+        <!-- Retro Transitions -->
+        <div class="inspector-group">
+          <div class="group-title">TRANSICIÓN DE ENTRADA</div>
+          <div class="prop-row" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+            <span>TIPO DE TRANSICIÓN:</span>
+            <select id="prop-transition-select" class="prop-select" style="width: 100%;">
+              ${transOptionsHtml}
+            </select>
+          </div>
+          <div class="prop-row" style="margin-top: 6px;">
+            <span>DURACIÓN:</span>
+            <input type="range" id="prop-trans-dur" class="prop-slider" min="0.2" max="2.5" step="0.1" value="${clip.transitionDuration || 0.8}" />
+            <span id="label-trans-dur" style="font-size: 8px;">${(clip.transitionDuration || 0.8).toFixed(1)}s</span>
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- Audio / Speed Controls -->
+      <div class="inspector-group">
+        <div class="group-title">AUDIO & REPRODUCCIÓN</div>
+        <div class="prop-row">
+          <span>VOLUMEN:</span>
+          <input type="range" id="prop-volume" class="prop-slider" min="0" max="2" step="0.05" value="${clip.volume !== undefined ? clip.volume : 1.0}" />
+          <span id="label-volume" style="font-size: 8px;">${Math.round((clip.volume !== undefined ? clip.volume : 1.0) * 100)}%</span>
+        </div>
+        <div class="prop-row">
+          <span>VELOCIDAD:</span>
+          <input type="range" id="prop-speed" class="prop-slider" min="0.25" max="3.0" step="0.25" value="${clip.speed || 1.0}" />
+          <span id="label-speed" style="font-size: 8px;">${clip.speed || 1.0}x</span>
+        </div>
+      </div>
+    `;
+
+    bindInspectorEvents(clip);
+  }
+
+  function bindInspectorEvents(clip) {
+    const nameInput = document.getElementById('prop-clip-name');
+    if (nameInput) {
+      nameInput.addEventListener('input', (e) => {
+        clip.name = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Text bindings
+    const textContent = document.getElementById('prop-text-content');
+    if (textContent) {
+      textContent.addEventListener('input', (e) => {
+        clip.text = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const textAnim = document.getElementById('prop-text-anim');
+    if (textAnim) {
+      textAnim.addEventListener('change', (e) => {
+        clip.textAnimation = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const fontSize = document.getElementById('prop-font-size');
+    const labelFontSize = document.getElementById('label-font-size');
+    if (fontSize) {
+      fontSize.addEventListener('input', (e) => {
+        clip.fontSize = parseInt(e.target.value);
+        if (labelFontSize) labelFontSize.textContent = `${clip.fontSize}px`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const textColor = document.getElementById('prop-text-color');
+    if (textColor) {
+      textColor.addEventListener('input', (e) => {
+        clip.textColor = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const strokeColor = document.getElementById('prop-stroke-color');
+    if (strokeColor) {
+      strokeColor.addEventListener('input', (e) => {
+        clip.strokeColor = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Transform bindings
+    const posX = document.getElementById('prop-pos-x');
+    const labelPosX = document.getElementById('label-pos-x');
+    if (posX) {
+      posX.addEventListener('input', (e) => {
+        clip.x = parseFloat(e.target.value);
+        if (labelPosX) labelPosX.textContent = `${Math.round(clip.x * 100)}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const posY = document.getElementById('prop-pos-y');
+    const labelPosY = document.getElementById('label-pos-y');
+    if (posY) {
+      posY.addEventListener('input', (e) => {
+        clip.y = parseFloat(e.target.value);
+        if (labelPosY) labelPosY.textContent = `${Math.round(clip.y * 100)}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const scale = document.getElementById('prop-scale');
+    const labelScale = document.getElementById('label-scale');
+    if (scale) {
+      scale.addEventListener('input', (e) => {
+        clip.scale = parseFloat(e.target.value);
+        if (labelScale) labelScale.textContent = `${Math.round(clip.scale * 100)}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const rotation = document.getElementById('prop-rotation');
+    const labelRotation = document.getElementById('label-rotation');
+    if (rotation) {
+      rotation.addEventListener('input', (e) => {
+        clip.rotation = parseInt(e.target.value);
+        if (labelRotation) labelRotation.textContent = `${clip.rotation}°`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const opacity = document.getElementById('prop-opacity');
+    const labelOpacity = document.getElementById('label-opacity');
+    if (opacity) {
+      opacity.addEventListener('input', (e) => {
+        clip.opacity = parseFloat(e.target.value);
+        if (labelOpacity) labelOpacity.textContent = `${Math.round(clip.opacity * 100)}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Filter bindings
+    const filterSelect = document.getElementById('prop-filter-select');
+    if (filterSelect) {
+      filterSelect.addEventListener('change', (e) => {
+        clip.filter = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const filterIntensity = document.getElementById('prop-filter-intensity');
+    const labelIntensity = document.getElementById('label-filter-intensity');
+    if (filterIntensity) {
+      filterIntensity.addEventListener('input', (e) => {
+        clip.filterIntensity = parseInt(e.target.value);
+        if (labelIntensity) labelIntensity.textContent = `${clip.filterIntensity}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Transition bindings
+    const transSelect = document.getElementById('prop-transition-select');
+    if (transSelect) {
+      transSelect.addEventListener('change', (e) => {
+        clip.transition = e.target.value;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const transDur = document.getElementById('prop-trans-dur');
+    const labelTransDur = document.getElementById('label-trans-dur');
+    if (transDur) {
+      transDur.addEventListener('input', (e) => {
+        clip.transitionDuration = parseFloat(e.target.value);
+        if (labelTransDur) labelTransDur.textContent = `${clip.transitionDuration.toFixed(1)}s`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Audio & Speed bindings
+    const volume = document.getElementById('prop-volume');
+    const labelVolume = document.getElementById('label-volume');
+    if (volume) {
+      volume.addEventListener('input', (e) => {
+        clip.volume = parseFloat(e.target.value);
+        if (labelVolume) labelVolume.textContent = `${Math.round(clip.volume * 100)}%`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    const speed = document.getElementById('prop-speed');
+    const labelSpeed = document.getElementById('label-speed');
+    if (speed) {
+      speed.addEventListener('input', (e) => {
+        clip.speed = parseFloat(e.target.value);
+        if (labelSpeed) labelSpeed.textContent = `${clip.speed}x`;
+        timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+  }
+
+  // Subscribe to timeline changes
+  timelineEngine.subscribe((event, data) => {
+    if (event === 'clipselected' || event === 'trackschange' || event === 'clipupdated') {
+      const selectedClip = timelineEngine.getSelectedClip();
+      renderInspector(selectedClip);
+    }
+  });
+
+  // Initial render
+  renderInspector(timelineEngine.getSelectedClip());
+}
