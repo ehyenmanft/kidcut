@@ -4,12 +4,14 @@
 
 import { exporter } from '../engine/Exporter.js';
 import { audioEngine } from '../engine/AudioEngine.js';
+import { nativeFetch } from '../engine/NativeBridge.js';
 
 export function setupExportModal(timelineEngine) {
   const modal = document.getElementById('export-modal');
   const closeBtn = document.getElementById('btn-close-export');
   const cancelBtn = document.getElementById('btn-cancel-export');
   const startBtn = document.getElementById('btn-start-export');
+  const openFolderBtn = document.getElementById('btn-open-export-folder');
   const progressWrap = document.getElementById('export-progress-wrap');
   const progressBar = document.getElementById('export-progress-bar');
   const msgStatus = document.getElementById('export-msg-status');
@@ -18,8 +20,15 @@ export function setupExportModal(timelineEngine) {
 
   let selectedResolution = '1080';
   let selectedRatio = '16:9';
-  let selectedFormat = 'webm';
+  let selectedFormat = 'mp4';
   let selectedFps = 30;
+
+  if (openFolderBtn) {
+    openFolderBtn.addEventListener('click', async () => {
+      audioEngine.playBeep(600, 'triangle', 0.05);
+      await nativeFetch('/api/open-output', { method: 'POST' }).catch(() => {});
+    });
+  }
 
   function setupButtonGroup(groupId, onSelect) {
     const buttons = document.querySelectorAll(`#${groupId} .pixel-opt-btn`);
@@ -52,6 +61,7 @@ export function setupExportModal(timelineEngine) {
   function open() {
     modal.classList.remove('hidden');
     progressWrap.classList.add('hidden');
+    if (openFolderBtn) openFolderBtn.classList.add('hidden');
     startBtn.disabled = false;
     startBtn.textContent = 'INICIAR RENDERIZADO';
   }
@@ -75,6 +85,7 @@ export function setupExportModal(timelineEngine) {
 
     startBtn.disabled = true;
     startBtn.textContent = 'RENDERIZANDO...';
+    if (openFolderBtn) openFolderBtn.classList.add('hidden');
     progressWrap.classList.remove('hidden');
     progressBar.style.width = '0%';
     msgStatus.textContent = 'INICIANDO MOTOR DETERMINISTA DE EXPORTACIÓN...';
@@ -99,15 +110,28 @@ export function setupExportModal(timelineEngine) {
 
       // Render finished successfully!
       audioEngine.playPowerup();
-      msgStatus.textContent = '¡RENDERIZADO COMPLETADO CON ÉXITO! DESCARGANDO...';
       progressBar.style.width = '100%';
-      startBtn.textContent = 'DESCARGAR NUEVAMENTE';
-      startBtn.disabled = false;
 
-      // Trigger automatic browser download
-      downloadAnchor.href = result.url;
-      downloadAnchor.download = `kidcut_${selectedRatio.replace(':', 'x')}_${selectedResolution}p_${Date.now()}.${result.format}`;
-      downloadAnchor.click();
+      if (result.native) {
+        msgStatus.textContent = '¡RENDERIZADO NATIVO WINDOWS COMPLETADO CON ÉXITO!';
+        statsLabel.textContent = `★ GUARDADO EN DISCO: ${result.outputPath} (RAM: ${result.ramMb || 36} MB)`;
+        if (openFolderBtn) openFolderBtn.classList.remove('hidden');
+        startBtn.textContent = 'NUEVO RENDER';
+        startBtn.disabled = false;
+
+        // Auto-open in explorer if possible
+        nativeFetch('/api/open-output', { method: 'POST' }).catch(() => {});
+      } else {
+        msgStatus.textContent = '¡RENDERIZADO COMPLETADO CON ÉXITO! DESCARGANDO...';
+        startBtn.textContent = 'DESCARGAR NUEVAMENTE';
+        startBtn.disabled = false;
+
+        if (result.url) {
+          downloadAnchor.href = result.url;
+          downloadAnchor.download = `kidcut_${selectedRatio.replace(':', 'x')}_${selectedResolution}p_${Date.now()}.${result.format}`;
+          downloadAnchor.click();
+        }
+      }
 
     } catch (err) {
       console.error(err);

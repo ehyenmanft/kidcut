@@ -11,10 +11,21 @@
     "electron": "electron electron/main.cjs",
     "start": "vite --open"
   },
-  "keywords": ["video-editor", "8-bit", "pixel-art", "retro", "capcut", "chiptune"],
+  "keywords": [
+    "video-editor",
+    "8-bit",
+    "pixel-art",
+    "retro",
+    "capcut",
+    "chiptune"
+  ],
   "author": "KidCut Studios",
   "license": "MIT",
   "devDependencies": {
     "vite": "^5.4.2"
+  },
+  "dependencies": {
+    "mp4-muxer": "^5.2.2",
+    "webm-muxer": "^5.1.4"
   }
 }

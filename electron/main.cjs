@@ -5,6 +5,7 @@ const path = require('path');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
 
 let mainWindow = null;
 

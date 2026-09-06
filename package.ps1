@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0) {
 # 2. Compilar KidCut.exe con csc.exe
 Write-Host "`n[2/4] Compilando ejecutable nativo KidCut.exe..." -ForegroundColor Green
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /target:winexe /win32icon:icon.ico /out:KidCut.exe Program.cs
+& $csc /target:winexe /win32icon:icon.ico /r:System.Web.Extensions.dll /out:KidCut.exe Program.cs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de KidCut.exe."
     exit 1

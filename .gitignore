@@ -26,3 +26,13 @@ lerna-debug.log*
 *.sln
 *.sw?
 Thumbs.db
+
+# Scratch and test files
+scratch/
+release/KidCut-Windows/scratch/
+*.mp4
+*.wav
+test_frame_*.jpg
+kidcut_port.json
+release/KidCut-Windows/kidcut_port.json
+release/KidCut-Windows/dist/kidcut_port.json

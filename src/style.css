@@ -34,6 +34,177 @@
      0 3px 0 0 #000;
 }
 
+/* ==========================================================================
+   10 RETRO & MODERN UI COLOR THEMES
+   ========================================================================== */
+
+/* 1. Arcade Gold (Default 80s) */
+body.theme-arcade {
+  --bg-primary: #0d0a1a;
+  --bg-secondary: #16122c;
+  --bg-panel: #1b1638;
+  --bg-track: #241e4a;
+  --bg-track-alt: #1f1940;
+  --color-gold: #ffd200;
+  --color-cyan: #00f0ff;
+  --color-magenta: #ff007f;
+  --color-green: #39ff14;
+  --border-highlight: #44377a;
+}
+
+/* 2. Cyberpunk 2088 (Neon High Voltage) */
+body.theme-cyberpunk {
+  --bg-primary: #050512;
+  --bg-secondary: #0d0b24;
+  --bg-panel: #141032;
+  --bg-track: #1f184d;
+  --bg-track-alt: #17123d;
+  --color-gold: #ffff00;
+  --color-cyan: #00ffff;
+  --color-magenta: #ff007f;
+  --color-green: #00ff66;
+  --color-purple: #c700ff;
+  --text-main: #e6ffff;
+  --text-dim: #7399b3;
+  --border-highlight: #00ffff;
+}
+
+/* 3. Game Boy Classic (Authentic Dot Matrix) */
+body.theme-gameboy {
+  --bg-primary: #0f380f;
+  --bg-secondary: #184718;
+  --bg-panel: #225222;
+  --bg-track: #306230;
+  --bg-track-alt: #285428;
+  --color-gold: #9bbc0f;
+  --color-cyan: #8bac0f;
+  --color-magenta: #306230;
+  --color-green: #9bbc0f;
+  --color-purple: #8bac0f;
+  --text-main: #9bbc0f;
+  --text-dim: #8bac0f;
+  --border-highlight: #8bac0f;
+}
+
+/* 4. Vaporwave Sunset (Miami 1984) */
+body.theme-vaporwave {
+  --bg-primary: #180b2c;
+  --bg-secondary: #22103d;
+  --bg-panel: #2e1552;
+  --bg-track: #3d1c6d;
+  --bg-track-alt: #34175e;
+  --color-gold: #ffb86c;
+  --color-cyan: #01cdfe;
+  --color-magenta: #ff71ce;
+  --color-green: #05ffa1;
+  --color-purple: #b967ff;
+  --text-main: #fff0fc;
+  --text-dim: #c59dd6;
+  --border-highlight: #ff71ce;
+}
+
+/* 5. NES Famicom (Classic 8-Bit Nintendo) */
+body.theme-nes {
+  --bg-primary: #1a0808;
+  --bg-secondary: #280e0e;
+  --bg-panel: #381515;
+  --bg-track: #4d1e1e;
+  --bg-track-alt: #401818;
+  --color-gold: #ffcc00;
+  --color-cyan: #ffffff;
+  --color-magenta: #d82800;
+  --color-green: #55bb00;
+  --color-purple: #990033;
+  --text-main: #ffffff;
+  --text-dim: #cca0a0;
+  --border-highlight: #d82800;
+}
+
+/* 6. Matrix Terminal (Digital Phosphor Rain) */
+body.theme-matrix {
+  --bg-primary: #020803;
+  --bg-secondary: #061508;
+  --bg-panel: #0a210d;
+  --bg-track: #0f3214;
+  --bg-track-alt: #0c2710;
+  --color-gold: #66ff66;
+  --color-cyan: #00ff66;
+  --color-magenta: #20e060;
+  --color-green: #00ff44;
+  --color-purple: #009933;
+  --text-main: #33ff33;
+  --text-dim: #1a992a;
+  --border-highlight: #00ff66;
+}
+
+/* 7. Dracula Synth (Dark Velvet & Violet) */
+body.theme-dracula {
+  --bg-primary: #191a21;
+  --bg-secondary: #21222c;
+  --bg-panel: #282a36;
+  --bg-track: #343746;
+  --bg-track-alt: #2c2f3d;
+  --color-gold: #f1fa8c;
+  --color-cyan: #8be9fd;
+  --color-magenta: #ff79c6;
+  --color-green: #50fa7b;
+  --color-purple: #bd93f9;
+  --text-main: #f8f8f2;
+  --text-dim: #6272a4;
+  --border-highlight: #bd93f9;
+}
+
+/* 8. Amber CRT Retro (Apple II / IBM Terminal) */
+body.theme-amber {
+  --bg-primary: #0f0700;
+  --bg-secondary: #1a0d00;
+  --bg-panel: #291500;
+  --bg-track: #3d2000;
+  --bg-track-alt: #331b00;
+  --color-gold: #ffb000;
+  --color-cyan: #ffd000;
+  --color-magenta: #ff8800;
+  --color-green: #ffa000;
+  --color-purple: #cc6600;
+  --text-main: #ffb000;
+  --text-dim: #aa6f00;
+  --border-highlight: #ffb000;
+}
+
+/* 9. Sega Genesis 16-Bit (Sonic Cobalt & Ring Gold) */
+body.theme-genesis {
+  --bg-primary: #060c1c;
+  --bg-secondary: #0c1733;
+  --bg-panel: #11224a;
+  --bg-track: #183069;
+  --bg-track-alt: #142857;
+  --color-gold: #ffcc00;
+  --color-cyan: #0088ff;
+  --color-magenta: #ff0055;
+  --color-green: #00cc66;
+  --color-purple: #7733ff;
+  --text-main: #e0eeff;
+  --text-dim: #7397cc;
+  --border-highlight: #0088ff;
+}
+
+/* 10. Bubblegum Kawaii (Pastel Anime Arcade) */
+body.theme-bubblegum {
+  --bg-primary: #210c26;
+  --bg-secondary: #2f1238;
+  --bg-panel: #3f194c;
+  --bg-track: #552366;
+  --bg-track-alt: #471d57;
+  --color-gold: #ffff66;
+  --color-cyan: #66ffcc;
+  --color-magenta: #ff80bf;
+  --color-green: #66ff99;
+  --color-purple: #d466ff;
+  --text-main: #ffebf5;
+  --text-dim: #c79ec9;
+  --border-highlight: #ff80bf;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -365,6 +536,46 @@ body.crt-active .crt-lines {
   font-size: 10px;
   color: var(--text-dim);
   margin-right: 4px;
+}
+
+/* THEME SELECTOR */
+.theme-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-secondary);
+  padding: 3px 8px;
+  border: 2px solid #000;
+  box-shadow: 2px 2px 0 var(--border-highlight);
+}
+
+.theme-label {
+  font-family: var(--font-retro);
+  font-size: 10px;
+  color: var(--color-gold);
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.theme-select {
+  font-family: var(--font-retro);
+  font-size: 10px;
+  font-weight: bold;
+  background: var(--bg-track);
+  color: var(--text-main);
+  border: 2px solid #000;
+  padding: 4px 8px;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 #000;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.theme-select:hover, .theme-select:focus {
+  border-color: var(--color-cyan);
 }
 
 .pixel-tab-btn {
@@ -1052,6 +1263,27 @@ body.crt-active .crt-lines {
   border-left: 4px solid var(--color-gold);
 }
 
+.timeline-waveform-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.65;
+  z-index: 1;
+}
+
+.clip-title-wrap {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  width: 100%;
+}
+
 .clip-title {
   font-size: 8px;
   color: #fff;
@@ -1061,29 +1293,83 @@ body.crt-active .crt-lines {
   pointer-events: none;
 }
 
+.clip-fx-badge {
+  background: var(--color-gold);
+  color: #000;
+  font-size: 7px;
+  font-weight: bold;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-family: monospace;
+  letter-spacing: 0.5px;
+  box-shadow: 1px 1px 0 #000;
+}
+
+.clip-mute-badge {
+  font-size: 10px;
+  margin-left: 2px;
+}
+
 /* TRIM HANDLES */
 .trim-handle {
   position: absolute;
   top: 0;
-  width: 8px;
+  width: 14px;
   height: 100%;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.5);
   cursor: ew-resize;
-  z-index: 10;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.trim-handle::after {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 1px;
+  box-shadow: 0 0 2px #000;
 }
 
 .trim-handle.trim-left {
   left: 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.4);
+  border-right: 2px solid var(--color-cyan);
 }
 
 .trim-handle.trim-right {
   right: 0;
-  border-left: 1px solid rgba(255, 255, 255, 0.4);
+  border-left: 2px solid var(--color-cyan);
 }
 
-.trim-handle:hover {
-  background: var(--color-gold);
+.trim-handle:hover,
+.trim-handle.trimming {
+  background: var(--color-gold) !important;
+}
+
+.trim-handle:hover::after,
+.trim-handle.trimming::after {
+  background: #000 !important;
+}
+
+/* FLOATING TRIM TOOLTIP */
+.timeline-trim-tooltip {
+  position: fixed;
+  display: none;
+  background: #090714;
+  border: 2px solid var(--color-cyan);
+  color: var(--color-gold);
+  font-family: var(--font-retro);
+  font-size: 9px;
+  font-weight: bold;
+  padding: 4px 8px;
+  box-shadow: 2px 2px #000, 0 0 8px rgba(0, 240, 255, 0.5);
+  pointer-events: none;
+  z-index: 10000;
+  white-space: nowrap;
 }
 
 /* TIMELINE PLAYHEAD */
@@ -1128,124 +1414,159 @@ body.crt-active .crt-lines {
   left: 0;
   width: 100vw;
   height: 100vh;
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.88);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  backdrop-filter: blur(4px);
 }
 
 .modal-box {
-  width: 620px;
-  max-width: 92vw;
+  width: 720px;
+  max-width: 95vw;
+  max-height: 90vh;
   background: var(--bg-panel);
   border: 4px solid #000;
-  box-shadow: 0 0 0 4px var(--border-highlight), 8px 8px 0 #000;
+  box-shadow: 0 0 0 4px var(--border-highlight), 10px 10px 0 #000;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .modal-header {
-  height: 44px;
+  height: 52px;
   background: var(--bg-secondary);
   border-bottom: 3px solid #000;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 20px;
+  flex-shrink: 0;
 }
 
 .modal-title {
-  font-family: var(--font-pixel);
-  font-size: 11px;
+  font-family: var(--font-retro);
+  font-size: 14px;
+  font-weight: bold;
   color: var(--color-gold);
+  letter-spacing: 0.5px;
 }
 
 .modal-close-btn {
   background: transparent;
   border: none;
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 20px;
   cursor: pointer;
+  padding: 4px 8px;
+  transition: color 0.15s;
 }
 .modal-close-btn:hover {
-  color: #fff;
+  color: #ff3344;
 }
 
 .modal-body {
-  padding: 16px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
+  overflow-y: auto;
 }
 
 .export-setting-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .export-setting-row label {
-  font-size: 9px;
+  font-family: var(--font-retro);
+  font-size: 12px;
+  font-weight: bold;
   color: var(--color-cyan);
+  letter-spacing: 0.5px;
 }
 
 .pixel-radio-group {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
+  gap: 8px;
 }
 
 .pixel-opt-btn {
   font-family: var(--font-retro);
-  font-size: 9px;
-  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 12px 14px;
   background: var(--bg-track);
   border: 2px solid #000;
   color: var(--text-main);
   cursor: pointer;
   text-align: left;
   box-shadow: 2px 2px 0 #000;
+  border-radius: 2px;
+  transition: transform 0.1s, background 0.15s;
+}
+
+.pixel-opt-btn:hover {
+  border-color: var(--color-cyan);
+  background: #191430;
 }
 
 .pixel-opt-btn.active {
   background: var(--color-gold);
   color: #000;
+  font-weight: bold;
   border-color: #000;
-  transform: translate(1px, 1px);
+  transform: translate(2px, 2px);
   box-shadow: 1px 1px 0 #000;
 }
 
 .export-progress-wrap {
   background: #090714;
-  border: 2px solid var(--color-cyan);
-  padding: 14px;
-  box-shadow: 2px 2px 0 #000;
+  border: 3px solid var(--color-cyan);
+  padding: 16px;
+  box-shadow: 3px 3px 0 #000;
+  margin-top: 6px;
 }
 
 .export-msg-status {
-  font-size: 10px;
+  font-family: var(--font-retro);
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: bold;
   color: var(--color-gold);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .export-stats {
-  font-size: 8px;
+  font-size: 12px;
   color: var(--color-green);
-  margin-top: 8px;
-  font-family: monospace;
+  margin-top: 10px;
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  letter-spacing: 0.5px;
 }
 
 .modal-footer {
-  height: 52px;
+  height: 60px;
   background: var(--bg-secondary);
   border-top: 3px solid #000;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 0 16px;
-  gap: 10px;
+  padding: 0 20px;
+  gap: 12px;
+  flex-shrink: 0;
 }
+
+.modal-footer .pixel-btn {
+  font-size: 12px;
+  padding: 10px 18px;
+}
+
 
 /* 100 EFFECTS & FILTERS CATALOG STYLES */
 .fx-category-pills {
@@ -1360,4 +1681,119 @@ button:disabled,
   font-weight: bold;
   color: var(--color-cyan);
 }
+
+/* ==========================================================================
+   VOICE RECORDER MODAL & VU METER
+   ========================================================================== */
+.voice-vu-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #090714;
+  border: 2px solid #000;
+  padding: 10px;
+  box-shadow: 2px 2px 0 #000;
+}
+
+.voice-vu-label {
+  font-family: var(--font-retro);
+  font-size: 10px;
+  color: var(--color-cyan);
+  letter-spacing: 0.5px;
+}
+
+.voice-vu-meter-bar {
+  height: 16px;
+  background: #141028;
+  border: 2px solid #000;
+  overflow: hidden;
+  position: relative;
+}
+
+.voice-vu-level {
+  height: 100%;
+  width: 0%;
+  background: var(--color-cyan);
+  transition: width 0.05s ease-out, background 0.1s;
+}
+
+.voice-timer-display {
+  font-family: 'Courier New', monospace;
+  font-size: 32px;
+  font-weight: bold;
+  color: #ff3344;
+  text-align: center;
+  letter-spacing: 2px;
+  background: #06040d;
+  padding: 12px;
+  border: 3px solid #000;
+  box-shadow: 2px 2px 0 #000;
+}
+
+.voice-status-msg {
+  font-family: var(--font-retro);
+  font-size: 11px;
+  color: var(--color-gold);
+  text-align: center;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+}
+
+/* 100 EFFECTS, 100 TRANSITIONS & 100 AUDIO DSP STYLING */
+.fx-category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.pixel-cat-pill {
+  background: var(--bg-tertiary, #1f1837);
+  border: 1px solid var(--border-color, #332759);
+  color: var(--text-dim, #a69bb8);
+  font-family: var(--font-retro);
+  font-size: 7px;
+  padding: 4px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.1s;
+}
+
+.pixel-cat-pill:hover,
+.pixel-cat-pill.active {
+  background: var(--color-gold, #ffd200);
+  color: #000;
+  border-color: #fff;
+  font-weight: bold;
+  box-shadow: 1px 1px 0 #000;
+}
+
+.subnav-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.subnav-btn {
+  flex: 1;
+  background: var(--bg-tertiary, #1f1837);
+  border: 2px solid #000;
+  color: var(--text-dim, #a69bb8);
+  font-family: var(--font-retro);
+  font-size: 8px;
+  padding: 6px 4px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.1s;
+}
+
+.subnav-btn:hover,
+.subnav-btn.active {
+  background: var(--color-cyan, #00f0ff);
+  color: #000;
+  border-color: #fff;
+  font-weight: bold;
+  box-shadow: 2px 2px 0 #000;
+}
+
 

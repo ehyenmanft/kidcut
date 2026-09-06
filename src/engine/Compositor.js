@@ -11,10 +11,10 @@ import { transitionsEngine } from './TransitionsEngine.js';
 export class Compositor {
   constructor() {
     this.offscreenCanvas = document.createElement('canvas');
-    this.offscreenCtx = this.offscreenCanvas.getContext('2d', { willReadFrequently: true });
+    this.offscreenCtx = this.offscreenCanvas.getContext('2d');
     
     this.clipCanvas = document.createElement('canvas');
-    this.clipCtx = this.clipCanvas.getContext('2d', { willReadFrequently: true });
+    this.clipCtx = this.clipCanvas.getContext('2d');
 
     this.aspectRatioKey = '16:9';
     this.baseWidth = 1920;
@@ -42,14 +42,17 @@ export class Compositor {
   }
 
   renderFrame(tracks, currentTime, targetCtx = null, scale = 1.0) {
-    const w = Math.round(this.baseWidth * scale);
-    const h = Math.round(this.baseHeight * scale);
+    const w = targetCtx ? targetCtx.canvas.width : Math.round(this.baseWidth * scale);
+    const h = targetCtx ? targetCtx.canvas.height : Math.round(this.baseHeight * scale);
 
-    if (this.offscreenCanvas.width !== w || this.offscreenCanvas.height !== h) {
-      this.updateDimensions(scale);
+    const ctx = targetCtx || this.offscreenCtx;
+    if (!targetCtx) {
+      if (this.offscreenCanvas.width !== w || this.offscreenCanvas.height !== h) {
+        this.offscreenCanvas.width = w;
+        this.offscreenCanvas.height = h;
+      }
     }
 
-    const ctx = this.offscreenCtx;
     ctx.imageSmoothingEnabled = false; // Authentic pixel rendering!
     
     // Clear background (deep retro dark)
@@ -84,14 +87,7 @@ export class Compositor {
       }
     }
 
-    // If destination canvas is provided, draw final frame to it
-    if (targetCtx) {
-      targetCtx.imageSmoothingEnabled = false;
-      targetCtx.clearRect(0, 0, targetCtx.canvas.width, targetCtx.canvas.height);
-      targetCtx.drawImage(this.offscreenCanvas, 0, 0, targetCtx.canvas.width, targetCtx.canvas.height);
-    }
-
-    return this.offscreenCanvas;
+    return targetCtx ? targetCtx.canvas : this.offscreenCanvas;
   }
 
   renderClip(ctx, clip, currentTime, targetW, targetH) {
@@ -170,28 +166,6 @@ export class Compositor {
   renderVideoClip(ctx, clip, currentTime, targetW, targetH) {
     const video = clip.mediaElement;
     if (!video) return;
-
-    const clipStart = clip.start;
-    const trimIn = clip.trimIn || 0;
-    const speed = clip.speed || 1.0;
-    const targetVideoTime = trimIn + ((currentTime - clipStart) * speed);
-
-    if (this.isExporting) {
-      // Offline export: exact time alignment without 0.25s throttling
-      const clampedTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
-      if (Math.abs(video.currentTime - clampedTime) > 0.001) {
-        video.currentTime = clampedTime;
-      }
-    } else {
-      // Smooth video synchronization during realtime playback: only seek if drift exceeds 0.25s
-      const drift = Math.abs(video.currentTime - targetVideoTime);
-      if (drift > 0.25) {
-        video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetVideoTime));
-      }
-    }
-    if (video.playbackRate !== speed) {
-      video.playbackRate = speed;
-    }
 
     const vw = video.videoWidth || targetW;
     const vh = video.videoHeight || targetH;

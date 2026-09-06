@@ -170,7 +170,34 @@ export class TimelineEngine {
       const deltaSec = (timestamp - this.lastPlaybackTimestamp) / 1000;
       this.lastPlaybackTimestamp = timestamp;
 
-      this.currentTime += deltaSec;
+      // Synchronize timeline with active playing video element if present
+      let masterVideoTime = null;
+      for (const track of this.tracks) {
+        if (track.type === 'video' && !track.hidden) {
+          for (const clip of track.clips) {
+            if (clip.mediaElement && clip.mediaElement.tagName === 'VIDEO') {
+              const v = clip.mediaElement;
+              const clipStart = clip.start;
+              const clipEnd = clip.start + clip.duration;
+              if (this.currentTime >= clipStart && this.currentTime < clipEnd && !v.paused && !v.seeking) {
+                const speed = clip.speed || 1.0;
+                const vTimelineTime = clipStart + ((v.currentTime - (clip.trimIn || 0)) / speed);
+                if (Math.abs(this.currentTime - vTimelineTime) < 0.6) {
+                  masterVideoTime = vTimelineTime;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (masterVideoTime !== null) break;
+      }
+
+      if (masterVideoTime !== null) {
+        this.currentTime = masterVideoTime;
+      } else {
+        this.currentTime += deltaSec;
+      }
       
       const maxDur = this.calculateTotalDuration();
       if (this.currentTime >= maxDur) {
@@ -321,19 +348,23 @@ export class TimelineEngine {
         }
 
         if (this.isPlaying) {
-          const drift = Math.abs(video.currentTime - targetTime);
-          if (drift > 0.3) {
-            video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
-          }
+          // If video is paused, initialize position and start playback smoothly
           if (video.paused) {
+            video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
             video.play().catch(() => {});
+          } else {
+            // Video is actively playing: never seek unless drift is catastrophic (> 1.2s)
+            const drift = Math.abs(video.currentTime - targetTime);
+            if (drift > 1.2) {
+              video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
+            }
           }
         } else {
           if (!video.paused) {
             video.pause();
           }
           const drift = Math.abs(video.currentTime - targetTime);
-          if (drift > 0.05) {
+          if (drift > 0.02) {
             video.currentTime = Math.max(0, Math.min(video.duration || 9999, targetTime));
           }
         }
@@ -365,6 +396,11 @@ export class TimelineEngine {
       trimIn: clipData.trimIn || 0,
       speed: clipData.speed || 1.0,
       volume: clipData.volume !== undefined ? clipData.volume : 1.0,
+      isMuted: clipData.isMuted || false,
+      audioEffect: clipData.audioEffect || 'none',
+      effectIntensity: clipData.effectIntensity !== undefined ? clipData.effectIntensity : 50,
+      fadeIn: clipData.fadeIn || 0,
+      fadeOut: clipData.fadeOut || 0,
       opacity: clipData.opacity !== undefined ? clipData.opacity : 1.0,
       x: clipData.x !== undefined ? clipData.x : 0.5,
       y: clipData.y !== undefined ? clipData.y : 0.5,
@@ -388,6 +424,130 @@ export class TimelineEngine {
     this.calculateTotalDuration();
     this.notify('trackschange', { tracks: this.tracks });
     return newClip;
+  }
+
+  // Audio Extraction: Decouple audio from video clip into a dedicated audio track
+  extractAudioFromClip(clipId) {
+    let sourceClip = null;
+    let sourceTrack = null;
+    for (const track of this.tracks) {
+      const c = track.clips.find(clip => clip.id === clipId);
+      if (c) {
+        sourceClip = c;
+        sourceTrack = track;
+        break;
+      }
+    }
+
+    if (!sourceClip || sourceClip.type !== 'video' || !sourceClip.audioBuffer) {
+      return null;
+    }
+
+    this.pushState(`Extraer Audio de ${sourceClip.name}`);
+
+    // Mute the original video clip so it doesn't double-play
+    sourceClip.isMuted = true;
+
+    // Find first available audio track or create a new one
+    let targetAudioTrack = this.tracks.find(t => t.type === 'audio');
+    if (!targetAudioTrack) {
+      targetAudioTrack = this.addTrack('audio');
+    }
+
+    const audioClip = {
+      id: 'clip_' + Math.random().toString(36).substr(2, 9),
+      name: `${sourceClip.name} (AUDIO EXTRAÍDO)`,
+      type: 'audio',
+      start: sourceClip.start,
+      duration: sourceClip.duration,
+      trimIn: sourceClip.trimIn || 0,
+      speed: sourceClip.speed || 1.0,
+      volume: sourceClip.volume !== undefined ? sourceClip.volume : 1.0,
+      isMuted: false,
+      audioBuffer: sourceClip.audioBuffer,
+      audioEffect: sourceClip.audioEffect || 'none',
+      effectIntensity: sourceClip.effectIntensity !== undefined ? sourceClip.effectIntensity : 50,
+      fadeIn: 0,
+      fadeOut: 0,
+      sourceVideoClipId: sourceClip.id
+    };
+
+    targetAudioTrack.clips.push(audioClip);
+    this.selectClip(audioClip.id);
+    this.calculateTotalDuration();
+    this.notify('trackschange', { tracks: this.tracks });
+    audioEngine.playCoin();
+    return audioClip;
+  }
+
+  /**
+   * Moves a clip from its current track to a target track.
+   */
+  moveClipToTrack(clipId, targetTrackId) {
+    let sourceTrack = null;
+    let clip = null;
+    for (const t of this.tracks) {
+      const idx = t.clips.findIndex(c => c.id === clipId);
+      if (idx !== -1) {
+        sourceTrack = t;
+        clip = t.clips[idx];
+        break;
+      }
+    }
+    if (!sourceTrack || !clip || sourceTrack.id === targetTrackId) return false;
+    const targetTrack = this.tracks.find(t => t.id === targetTrackId);
+    if (!targetTrack || targetTrack.type !== sourceTrack.type) return false;
+
+    this.pushState(`Mover ${clip.name} a ${targetTrack.name}`);
+    sourceTrack.clips = sourceTrack.clips.filter(c => c.id !== clipId);
+    targetTrack.clips.push(clip);
+    this.calculateTotalDuration();
+    this.notify('trackschange', { tracks: this.tracks });
+    audioEngine.playBeep(520, 'triangle', 0.05);
+    return true;
+  }
+
+  /**
+   * Duplicates a video clip onto the V2 Overlay track so they play in parallel.
+   */
+  duplicateClipToOverlay(clipId) {
+    let sourceClip = null;
+    for (const t of this.tracks) {
+      const c = t.clips.find(item => item.id === clipId);
+      if (c) {
+        sourceClip = c;
+        break;
+      }
+    }
+    if (!sourceClip) return null;
+
+    const v2Track = this.tracks.find(t => t.id === 'track-v2') || this.tracks.find(t => t.type === 'video');
+    if (!v2Track) return null;
+
+    this.pushState(`Superponer ${sourceClip.name} en V2`);
+    const newClip = {
+      ...sourceClip,
+      id: 'clip_' + Math.random().toString(36).substr(2, 9),
+      name: `${sourceClip.name} (OVERLAY)`,
+      start: sourceClip.start,
+      scale: 0.6,
+      x: 0.75,
+      y: 0.25
+    };
+    v2Track.clips.push(newClip);
+    this.selectClip(newClip.id);
+    this.calculateTotalDuration();
+    this.notify('trackschange', { tracks: this.tracks });
+    audioEngine.playCoin();
+    return newClip;
+  }
+
+  extractAudioFromSelectedClip() {
+    const selected = this.getSelectedClip();
+    if (!selected || selected.type !== 'video' || !selected.audioBuffer) {
+      return null;
+    }
+    return this.extractAudioFromClip(selected.id);
   }
 
   selectClip(clipId, multi = false) {
@@ -651,18 +811,80 @@ export class TimelineEngine {
     if (edge === 'left') {
       const newStart = Math.max(0, clip.start + deltaSec);
       const actualDelta = newStart - clip.start;
-      if (clip.duration - actualDelta >= 0.2) {
+      if (clip.duration - actualDelta >= 0.15) {
         clip.start = newStart;
         clip.duration -= actualDelta;
         clip.trimIn = Math.max(0, (clip.trimIn || 0) + actualDelta);
       }
     } else if (edge === 'right') {
-      const newDuration = Math.max(0.2, clip.duration + deltaSec);
+      const newDuration = Math.max(0.15, clip.duration + deltaSec);
       clip.duration = newDuration;
     }
 
     this.calculateTotalDuration();
     this.notify('trackschange', { tracks: this.tracks });
+  }
+
+  // Set clip trim / duration with full bounds and bounds verification
+  setClipTrim(clipId, edge, newTimeValue) {
+    const clip = this.getSelectedClip();
+    if (!clip || clip.id !== clipId) return;
+
+    if (edge === 'right') {
+      const minDuration = 0.15;
+      let maxDuration = Infinity;
+      if (clip.mediaElement && clip.mediaElement.duration && !isNaN(clip.mediaElement.duration)) {
+        maxDuration = (clip.mediaElement.duration / (clip.speed || 1.0)) - (clip.trimIn || 0);
+      } else if (clip.audioBuffer && clip.audioBuffer.duration) {
+        maxDuration = (clip.audioBuffer.duration / (clip.speed || 1.0)) - (clip.trimIn || 0);
+      }
+      
+      let duration = Math.max(minDuration, newTimeValue);
+      if (isFinite(maxDuration) && maxDuration > 0) {
+        duration = Math.min(duration, maxDuration);
+      }
+      clip.duration = Number(duration.toFixed(3));
+    } else if (edge === 'left') {
+      const currentEnd = clip.start + clip.duration;
+      let newStart = Math.max(0, newTimeValue);
+      if (currentEnd - newStart < 0.15) {
+        newStart = currentEnd - 0.15;
+      }
+      const shift = newStart - clip.start;
+      const newTrimIn = (clip.trimIn || 0) + shift;
+      if (newTrimIn < 0) {
+        newStart = clip.start - (clip.trimIn || 0);
+        clip.trimIn = 0;
+      } else {
+        clip.trimIn = Number(newTrimIn.toFixed(3));
+      }
+      clip.duration = Number((currentEnd - newStart).toFixed(3));
+      clip.start = Number(newStart.toFixed(3));
+    }
+
+    this.calculateTotalDuration();
+    this.notify('trackschange', { tracks: this.tracks });
+  }
+
+  applySnappingToPoint(clipId, timePoint) {
+    const snapCandidates = [0, this.currentTime];
+
+    for (const track of this.tracks) {
+      for (const c of track.clips) {
+        if (c.id !== clipId) {
+          snapCandidates.push(c.start);
+          snapCandidates.push(c.start + c.duration);
+        }
+      }
+    }
+
+    for (const snapPoint of snapCandidates) {
+      if (Math.abs(timePoint - snapPoint) <= this.snapThresholdSeconds) {
+        return snapPoint;
+      }
+    }
+
+    return timePoint;
   }
 
   applySnapping(clipId, start, duration) {

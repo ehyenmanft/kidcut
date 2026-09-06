@@ -72,41 +72,82 @@ export class EffectsEngine {
       return;
     }
 
-    // Raster pixel manipulations
-    const imgData = ctx.getImageData(0, 0, width, height);
+    // High-performance raster pixel manipulations with authentic retro downscale
+    const maxRasterDim = 480;
+    const needsDownscale = width > maxRasterDim || height > maxRasterDim;
+
+    let targetW = width;
+    let targetH = height;
+    let workCtx = ctx;
+
+    if (needsDownscale) {
+      const scale = maxRasterDim / Math.max(width, height);
+      targetW = Math.max(1, Math.round(width * scale));
+      targetH = Math.max(1, Math.round(height * scale));
+
+      if (this.auxCanvas.width !== targetW || this.auxCanvas.height !== targetH) {
+        this.auxCanvas.width = targetW;
+        this.auxCanvas.height = targetH;
+      }
+      this.auxCtx.imageSmoothingEnabled = false;
+      this.auxCtx.drawImage(ctx.canvas, 0, 0, targetW, targetH);
+      workCtx = this.auxCtx;
+    }
+
+    const imgData = workCtx.getImageData(0, 0, targetW, targetH);
     const data = imgData.data;
 
     // Palette effects
     if (this.isPaletteEffect(effectId)) {
-      this.applyPalette(data, effectId, width, height);
-      ctx.putImageData(imgData, 0, 0);
+      this.applyPalette(data, effectId, targetW, targetH);
+      workCtx.putImageData(imgData, 0, 0);
+      if (needsDownscale) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(this.auxCanvas, 0, 0, targetW, targetH, 0, 0, width, height);
+      }
       return;
     }
 
     // CRT & Screen effects
     if (this.isCrtRasterEffect(effectId)) {
-      this.applyCrtRaster(ctx, data, effectId, width, height, intensity, currentTime);
-      ctx.putImageData(imgData, 0, 0);
-      this.applyCrtPost(ctx, effectId, width, height, intensity, currentTime);
+      this.applyCrtRaster(workCtx, data, effectId, targetW, targetH, intensity, currentTime);
+      workCtx.putImageData(imgData, 0, 0);
+      this.applyCrtPost(workCtx, effectId, targetW, targetH, intensity, currentTime);
+      if (needsDownscale) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(this.auxCanvas, 0, 0, targetW, targetH, 0, 0, width, height);
+      }
       return;
     }
 
     // Pixel & Mosaic effects
     if (this.isPixelRasterEffect(effectId)) {
-      this.applyPixelRaster(ctx, data, effectId, width, height, intensity, currentTime);
-      ctx.putImageData(imgData, 0, 0);
+      this.applyPixelRaster(workCtx, data, effectId, targetW, targetH, intensity, currentTime);
+      workCtx.putImageData(imgData, 0, 0);
+      if (needsDownscale) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(this.auxCanvas, 0, 0, targetW, targetH, 0, 0, width, height);
+      }
       return;
     }
 
     // Color & Grading effects
     if (this.isColorRasterEffect(effectId)) {
-      this.applyColorRaster(data, effectId, width, height, intensity);
-      ctx.putImageData(imgData, 0, 0);
+      this.applyColorRaster(data, effectId, targetW, targetH, intensity);
+      workCtx.putImageData(imgData, 0, 0);
+      if (needsDownscale) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(this.auxCanvas, 0, 0, targetW, targetH, 0, 0, width, height);
+      }
       return;
     }
 
-    // Fallback: put unmodified or standard
-    ctx.putImageData(imgData, 0, 0);
+    // Fallback
+    workCtx.putImageData(imgData, 0, 0);
+    if (needsDownscale) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.auxCanvas, 0, 0, targetW, targetH, 0, 0, width, height);
+    }
   }
 
   // =========================================================================

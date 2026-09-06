@@ -83,4 +83,30 @@ export function setupHeaderBar(timelineEngine, onOpenExport) {
     audioEngine.playCoin();
     if (onOpenExport) onOpenExport();
   });
+
+  // 10 UI Themes Selector
+  const themeSelect = document.getElementById('select-ui-theme');
+  const allThemeClasses = [
+    'theme-arcade', 'theme-cyberpunk', 'theme-gameboy', 'theme-vaporwave',
+    'theme-nes', 'theme-matrix', 'theme-dracula', 'theme-amber',
+    'theme-genesis', 'theme-bubblegum'
+  ];
+
+  function applyTheme(themeKey) {
+    document.body.classList.remove(...allThemeClasses);
+    document.body.classList.add(`theme-${themeKey}`);
+  }
+
+  if (themeSelect) {
+    const savedTheme = localStorage.getItem('kidcut_ui_theme') || 'arcade';
+    themeSelect.value = savedTheme;
+    applyTheme(savedTheme);
+
+    themeSelect.addEventListener('change', (e) => {
+      const selected = e.target.value;
+      applyTheme(selected);
+      localStorage.setItem('kidcut_ui_theme', selected);
+      audioEngine.playPowerup();
+    });
+  }
 }

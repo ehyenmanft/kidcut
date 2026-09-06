@@ -11,8 +11,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen:wght@400;700&family=VT323&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   
-  <script type="module" crossorigin src="/assets/index-CUHiOhsS.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-NWQqnrgS.css">
+  <script type="module" crossorigin src="/assets/index-Nc9KyF9y.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-1AHAetNx.css">
 </head>
 <body class="pixel-theme crt-active">
   <!-- CRT Monitor Scanline Overlay -->
@@ -72,6 +72,23 @@
 
       <!-- Right Actions: CRT Toggle, Undo/Redo, Export -->
       <div class="header-actions">
+        <!-- 10 Color Themes Selector -->
+        <div class="theme-selector-wrap" title="Seleccionar combinación de colores de KidCut">
+          <span class="theme-label">🎨 TEMA:</span>
+          <select id="select-ui-theme" class="theme-select">
+            <option value="arcade">🕹️ Arcade Gold (80s)</option>
+            <option value="cyberpunk">⚡ Cyberpunk 2088</option>
+            <option value="gameboy">👾 Game Boy Classic</option>
+            <option value="vaporwave">🌴 Vaporwave Miami</option>
+            <option value="nes">🎮 NES Famicom</option>
+            <option value="matrix">💻 Matrix Terminal</option>
+            <option value="dracula">🧛 Dracula Synth</option>
+            <option value="amber">📻 Amber CRT Retro</option>
+            <option value="genesis">🦔 Sega Genesis 16-Bit</option>
+            <option value="bubblegum">🍬 Bubblegum Kawaii</option>
+          </select>
+        </div>
+
         <button id="btn-undo" class="pixel-btn btn-sm btn-undo" title="Deshacer última acción (Ctrl+Z)" disabled>
           ↩ DESHACER
         </button>
@@ -195,6 +212,16 @@
           <button id="btn-tool-duplicate" class="pixel-tool-btn" title="Duplicar seleccionado (Ctrl+D)">
             📑 DUPLICAR
           </button>
+          <button id="btn-tool-overlay" class="pixel-tool-btn" style="color: var(--color-cyan); font-weight: bold; border-color: var(--color-cyan);" title="Superponer clip seleccionado o duplicar en pista V2 en paralelo">
+            ⚡ SUPERPONER (V2)
+          </button>
+          <div class="toolbar-sep"></div>
+          <button id="btn-tool-extract-audio" class="pixel-tool-btn" title="Extraer audio de clip de video a pista independiente">
+            🎵 EXTRAER AUDIO
+          </button>
+          <button id="btn-tool-record-voice" class="pixel-tool-btn" style="color: var(--color-gold); font-weight: bold;" title="Grabar voz con micrófono">
+            🎙️ GRABAR VOZ
+          </button>
           <div class="toolbar-sep"></div>
           <button id="btn-add-video-track" class="pixel-tool-btn" title="Agregar Pista de Video">+ VISTA (V)</button>
           <button id="btn-add-audio-track" class="pixel-tool-btn" title="Agregar Pista de Audio">+ AUDIO (A)</button>
@@ -272,10 +299,10 @@
         <div class="export-setting-row">
           <label>FORMATO DE SALIDA:</label>
           <div class="pixel-radio-group" id="export-format-group">
-            <button class="pixel-opt-btn active" data-format="webm">WebM (Ultra Compatible / Máxima Nitidez)</button>
-            <button class="pixel-opt-btn" data-format="mp4">MP4 (Universal)</button>
-            <button class="pixel-opt-btn" data-format="gif">GIF Animado 8-Bit</button>
-            <button class="pixel-opt-btn" data-format="wav">Audio WAV (Solo Pista)</button>
+            <button class="pixel-opt-btn active" data-format="mp4">🎬 MP4 (H.264 + AAC Universal Windows/Móvil)</button>
+            <button class="pixel-opt-btn" data-format="webm">🌐 WebM (VP9 + Opus Alta Definición)</button>
+            <button class="pixel-opt-btn" data-format="gif">👾 GIF Animado (8-Bit LZW)</button>
+            <button class="pixel-opt-btn" data-format="wav">🎵 Audio WAV (16-Bit PCM)</button>
           </div>
         </div>
 
@@ -300,8 +327,69 @@
 
       <div class="modal-footer">
         <button id="btn-cancel-export" class="pixel-btn btn-secondary">CANCELAR</button>
+        <button id="btn-open-export-folder" class="pixel-btn btn-secondary hidden" style="background: #1a4488; color: #fff;">📁 ABRIR EN EXPLORADOR</button>
         <button id="btn-start-export" class="pixel-btn arcade-gold">INICIAR RENDERIZADO</button>
         <a id="download-anchor" class="hidden" download="kidcut_export.webm"></a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Voice Recorder Modal -->
+  <div id="voice-recorder-modal" class="modal-overlay hidden">
+    <div class="modal-box pixel-box" style="width: 540px;">
+      <div class="modal-header">
+        <span class="modal-title">🎙️ GRABADOR DE VOZ (MICRÓFONO)</span>
+        <button id="btn-close-voice-modal" class="modal-close-btn">✖</button>
+      </div>
+
+      <div class="modal-body">
+        <div style="font-size: 11px; color: var(--color-cyan); line-height: 1.4;">
+          Habla hacia tu micrófono para grabar tu voz o narración e insertarla directamente en la línea de tiempo.
+        </div>
+
+        <!-- VU Meter Display -->
+        <div class="voice-vu-container">
+          <div class="voice-vu-label">NIVEL DE ENTRADA (MIC):</div>
+          <div class="voice-vu-meter-bar">
+            <div id="voice-vu-level" class="voice-vu-level" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Timer Display -->
+        <div class="voice-timer-display" id="voice-timer-display">00:00.0</div>
+
+        <!-- Status Message -->
+        <div class="voice-status-msg" id="voice-status-msg">LISTO PARA GRABAR</div>
+
+        <!-- Retro Audio Effect Selector for Voice -->
+        <div class="export-setting-row" style="margin-top: 8px;">
+          <label>EFECTO DE VOZ AUTOMÁTICO:</label>
+          <select id="voice-effect-select" class="prop-select" style="width: 100%;">
+            <option value="none">-- VOZ NATURAL (SIN EFECTO) --</option>
+            <option value="robot">🤖 Robot / Dalek Arcade</option>
+            <option value="bitcrusher">👾 Bitcrusher 8-Bit Chiptune</option>
+            <option value="walkie_talkie">📻 Radio / Walkie-Talkie</option>
+            <option value="pitch_high">🐿️ Voz de Ardilla (Helio)</option>
+            <option value="pitch_low">👹 Voz de Monstruo (Grave)</option>
+            <option value="echo">🔊 Eco Retro</option>
+            <option value="reverb">⛰️ Reverb Caverna</option>
+            <option value="underwater">🌊 Efecto Bajo el Agua</option>
+          </select>
+        </div>
+
+        <!-- Preview Audio Element -->
+        <audio id="voice-audio-preview" controls class="hidden" style="width: 100%; margin-top: 8px;"></audio>
+      </div>
+
+      <div class="modal-footer" style="justify-content: space-between;">
+        <div style="display: flex; gap: 8px;">
+          <button id="btn-record-start" class="pixel-btn" style="background: #ff2244; color: #fff;">● GRABAR</button>
+          <button id="btn-record-stop" class="pixel-btn btn-secondary" disabled>■ DETENER</button>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button id="btn-record-cancel" class="pixel-btn btn-secondary">CANCELAR</button>
+          <button id="btn-record-insert" class="pixel-btn arcade-gold" disabled>💾 INSERTAR EN TIMELINE</button>
+        </div>
       </div>
     </div>
   </div>

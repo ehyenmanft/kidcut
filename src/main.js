@@ -12,6 +12,7 @@ import { setupPreviewCanvas } from './ui/PreviewCanvas.js';
 import { setupTimelineView } from './ui/TimelineView.js';
 import { setupInspectorView } from './ui/InspectorView.js';
 import { setupExportModal } from './ui/ExportModal.js';
+import { setupVoiceRecorder } from './ui/VoiceRecorder.js';
 
 window.addEventListener('DOMContentLoaded', async () => {
   // 1. Setup Preview & Controllers
@@ -21,6 +22,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   setupAssetLibrary(timelineEngine);
   setupTimelineView(timelineEngine);
   setupInspectorView(timelineEngine);
+  setupVoiceRecorder(timelineEngine);
 
   // 2. Load Demo Starter Project (Instant arcade playground)
   await loadDemoProject();

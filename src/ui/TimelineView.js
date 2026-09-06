@@ -13,19 +13,29 @@ export function setupTimelineView(timelineEngine) {
   const scrollArea = document.getElementById('timeline-scroll-area');
 
   let pxPerSecond = 80; // Zoom factor
-  const minPxPerSecond = 30;
-  const maxPxPerSecond = 240;
+  const minPxPerSecond = 20;
+  const maxPxPerSecond = 360;
 
   // Zoom controls
   const zoomInBtn = document.getElementById('btn-zoom-in');
   const zoomOutBtn = document.getElementById('btn-zoom-out');
   const zoomLabel = document.getElementById('zoom-level-label');
 
-  function setZoom(val) {
+  function setZoom(val, anchorClientX = null) {
+    const prevZoom = pxPerSecond;
     pxPerSecond = Math.max(minPxPerSecond, Math.min(maxPxPerSecond, val));
     const percent = Math.round((pxPerSecond / 80) * 100);
-    zoomLabel.textContent = `${percent}%`;
-    render();
+    if (zoomLabel) zoomLabel.textContent = `${percent}%`;
+
+    if (anchorClientX !== null && scrollArea) {
+      const rect = scrollArea.getBoundingClientRect();
+      const mouseX = Math.max(0, anchorClientX - rect.left);
+      const timeAtCursor = (scrollArea.scrollLeft + mouseX) / prevZoom;
+      render();
+      scrollArea.scrollLeft = Math.max(0, (timeAtCursor * pxPerSecond) - mouseX);
+    } else {
+      render();
+    }
   }
 
   zoomInBtn.addEventListener('click', () => {
@@ -36,6 +46,25 @@ export function setupTimelineView(timelineEngine) {
     setZoom(pxPerSecond / 1.25);
     audioEngine.playBeep(400, 'square', 0.03);
   });
+
+  // Timeline Mouse Wheel Zoom (Ensanchar/reducir línea de tiempo con rueda del mouse)
+  const timelinePanel = document.getElementById('timeline-body-wrapper') || scrollArea;
+  const timelineContainerEl = document.querySelector('.timeline-container') || timelinePanel;
+
+  const handleTimelineWheel = (e) => {
+    // Check if event occurred over timeline container
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Wheel up (negative deltaY): zoom in (amplify / widen timeline)
+    // Wheel down (positive deltaY): zoom out (shrink / reduce timeline)
+    const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+    setZoom(pxPerSecond * zoomFactor, e.clientX);
+  };
+
+  if (timelineContainerEl) {
+    timelineContainerEl.addEventListener('wheel', handleTimelineWheel, { passive: false });
+  }
 
   // Snapping checkbox
   const snapCheck = document.getElementById('chk-snap');
@@ -127,6 +156,40 @@ export function setupTimelineView(timelineEngine) {
   document.getElementById('btn-add-audio-track').addEventListener('click', () => {
     timelineEngine.addTrack('audio');
   });
+
+  const btnExtractAudio = document.getElementById('btn-tool-extract-audio');
+  if (btnExtractAudio) {
+    btnExtractAudio.addEventListener('click', () => {
+      const clip = timelineEngine.getSelectedClip();
+      if (!clip || clip.type !== 'video' || !clip.audioBuffer) {
+        alert('Selecciona un clip de video que contenga audio para extraer su pista.');
+        return;
+      }
+      timelineEngine.extractAudioFromClip(clip.id);
+    });
+  }
+
+  const btnOverlay = document.getElementById('btn-tool-overlay');
+  if (btnOverlay) {
+    btnOverlay.addEventListener('click', () => {
+      const selected = timelineEngine.getSelectedClip();
+      if (!selected) {
+        alert('Selecciona un clip en la línea de tiempo para superponerlo en paralelo en la pista V2.');
+        return;
+      }
+      if (selected.type === 'audio') {
+        timelineEngine.moveClipToTrack(selected.id, 'track-a2');
+      } else {
+        const currentTrack = timelineEngine.tracks.find(t => t.clips.some(c => c.id === selected.id));
+        if (currentTrack && currentTrack.id === 'track-v2') {
+          timelineEngine.moveClipToTrack(selected.id, 'track-v1');
+        } else {
+          timelineEngine.duplicateClipToOverlay(selected.id);
+        }
+      }
+      render();
+    });
+  }
 
   // Draw Ruler (Accurate, dynamic scaling without overlapping text)
   function drawRuler() {
@@ -365,6 +428,30 @@ export function setupTimelineView(timelineEngine) {
       row.className = 'track-row';
       row.dataset.trackId = track.id;
 
+      // Allow dragging assets directly from Asset Library onto this track
+      row.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        row.style.background = 'rgba(0, 240, 255, 0.15)';
+      });
+      row.addEventListener('dragleave', () => {
+        row.style.background = '';
+      });
+      row.addEventListener('drop', (e) => {
+        e.preventDefault();
+        row.style.background = '';
+        const assetId = e.dataTransfer.getData('text/kidcut-asset-id');
+        if (assetId && window.__kidcutGetAssetById && window.__kidcutAddAssetToTimeline) {
+          const asset = window.__kidcutGetAssetById(assetId);
+          if (asset) {
+            const rect = row.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const dropTime = Math.max(0, clickX / pxPerSecond);
+            window.__kidcutAddAssetToTimeline(asset, track.id, dropTime);
+          }
+        }
+      });
+
       // Render Clips in this track
       track.clips.forEach((clip) => {
         const clipEl = document.createElement('div');
@@ -379,11 +466,39 @@ export function setupTimelineView(timelineEngine) {
         clipEl.style.left = `${left}px`;
         clipEl.style.width = `${width}px`;
 
+        const effectBadge = clip.audioEffect && clip.audioEffect !== 'none' ? `<span class="clip-fx-badge" title="Efecto: ${clip.audioEffect}">FX</span>` : '';
+        const muteBadge = clip.isMuted ? `<span class="clip-mute-badge" title="Silenciado">🔇</span>` : '';
+        const waveformCanvasHtml = clip.audioBuffer ? `<canvas class="timeline-waveform-canvas" width="${Math.round(Math.max(10, width))}" height="28"></canvas>` : '';
+
         clipEl.innerHTML = `
           <div class="trim-handle trim-left" data-edge="left"></div>
-          <span class="clip-title">${clip.name}</span>
+          ${waveformCanvasHtml}
+          <div class="clip-title-wrap">
+            <span class="clip-title">${clip.name}</span>
+            ${effectBadge}
+            ${muteBadge}
+          </div>
           <div class="trim-handle trim-right" data-edge="right"></div>
         `;
+
+        if (clip.audioBuffer) {
+          const wfCanvas = clipEl.querySelector('.timeline-waveform-canvas');
+          if (wfCanvas) {
+            const wfCtx = wfCanvas.getContext('2d');
+            const barsCount = Math.max(8, Math.min(80, Math.floor(width / 4)));
+            if (!clip._waveformCache || clip._waveformCache.length !== barsCount) {
+              clip._waveformCache = audioEngine.generateWaveformData(clip.audioBuffer, barsCount);
+            }
+            const data = clip._waveformCache;
+            const mid = wfCanvas.height / 2;
+            const barW = Math.max(1.5, width / data.length);
+            wfCtx.fillStyle = clip.isMuted ? 'rgba(150, 150, 160, 0.4)' : 'rgba(0, 240, 255, 0.55)';
+            for (let i = 0; i < data.length; i++) {
+              const h = Math.max(2, data[i] * (wfCanvas.height - 4));
+              wfCtx.fillRect(i * barW, mid - (h / 2), Math.max(1, barW - 1), h);
+            }
+          }
+        }
 
         // Select clip on click (supports Shift / Ctrl multi-selection)
         clipEl.addEventListener('mousedown', (e) => {
@@ -465,6 +580,20 @@ export function setupTimelineView(timelineEngine) {
         c.start = Math.max(0, init + deltaSeconds);
       }
 
+      // Allow vertical dragging between tracks of the same type (e.g. V1 <-> V2)
+      const hoverElements = document.elementsFromPoint(e.clientX, e.clientY);
+      const targetRow = hoverElements ? hoverElements.find(el => el && el.classList && el.classList.contains('track-row')) : null;
+      if (targetRow && targetRow.dataset.trackId) {
+        const targetTrackId = targetRow.dataset.trackId;
+        const currentTrack = timelineEngine.tracks.find(t => t.clips.some(item => item.id === clip.id));
+        if (currentTrack && currentTrack.id !== targetTrackId) {
+          const targetTrack = timelineEngine.tracks.find(t => t.id === targetTrackId);
+          if (targetTrack && targetTrack.type === currentTrack.type) {
+            timelineEngine.moveClipToTrack(clip.id, targetTrackId);
+          }
+        }
+      }
+
       timelineEngine.calculateTotalDuration();
       timelineEngine.notify('trackschange');
       render();
@@ -479,24 +608,132 @@ export function setupTimelineView(timelineEngine) {
     window.addEventListener('mouseup', onMouseUp);
   }
 
-  // Clip Trim In/Out Handler
+  // Clip Trim In/Out Handler (Reducir o Ampliar clip o audio arrastrando los extremos)
   function startTrimmingClip(clip, edge, startEvent) {
     timelineEngine.selectClip(clip.id);
-    timelineEngine.pushState(`Recortar ${clip.name}`);
     const startX = startEvent.clientX;
+    const initialStart = clip.start;
+    const initialDuration = clip.duration;
+    const initialTrimIn = clip.trimIn || 0;
+
+    let maxSourceDuration = Infinity;
+    if (clip.mediaElement && clip.mediaElement.duration && !isNaN(clip.mediaElement.duration)) {
+      maxSourceDuration = clip.mediaElement.duration / (clip.speed || 1.0);
+    } else if (clip.audioBuffer && clip.audioBuffer.duration) {
+      maxSourceDuration = clip.audioBuffer.duration / (clip.speed || 1.0);
+    }
+
+    let hasChanged = false;
+    audioEngine.playBeep(450, 'square', 0.03);
+
+    // Floating tooltip
+    let trimTooltip = document.getElementById('timeline-trim-tooltip');
+    if (!trimTooltip) {
+      trimTooltip = document.createElement('div');
+      trimTooltip.id = 'timeline-trim-tooltip';
+      trimTooltip.className = 'timeline-trim-tooltip';
+      document.body.appendChild(trimTooltip);
+    }
+    trimTooltip.style.display = 'block';
+
+    const updateTooltip = (e, text) => {
+      trimTooltip.textContent = text;
+      trimTooltip.style.left = `${e.clientX + 14}px`;
+      trimTooltip.style.top = `${e.clientY - 28}px`;
+    };
+
+    updateTooltip(startEvent, `⏱ DURACIÓN: ${initialDuration.toFixed(2)}s`);
+
+    const handleEl = startEvent.target;
+    if (handleEl && handleEl.classList) {
+      handleEl.classList.add('trimming');
+    }
 
     const onMouseMove = (e) => {
       const deltaX = e.clientX - startX;
-      const deltaSeconds = deltaX / pxPerSecond;
-      timelineEngine.trimClip(clip.id, edge, deltaSeconds);
+      let deltaSeconds = deltaX / pxPerSecond;
+
+      if (edge === 'right') {
+        let newDuration = initialDuration + deltaSeconds;
+
+        if (timelineEngine.isSnapping) {
+          const targetEnd = initialStart + newDuration;
+          const snappedEnd = timelineEngine.applySnappingToPoint(clip.id, targetEnd);
+          newDuration = snappedEnd - initialStart;
+        }
+
+        if (newDuration < 0.15) newDuration = 0.15;
+        const availableDuration = maxSourceDuration - initialTrimIn;
+        if (isFinite(availableDuration) && availableDuration > 0) {
+          if (newDuration > availableDuration) {
+            newDuration = availableDuration;
+          }
+        }
+
+        clip.duration = Math.max(0.15, Number(newDuration.toFixed(3)));
+        hasChanged = true;
+        const diff = clip.duration - initialDuration;
+        updateTooltip(e, `⏱ DURACIÓN: ${clip.duration.toFixed(2)}s (${diff >= 0 ? '+' : ''}${diff.toFixed(2)}s)`);
+      } else if (edge === 'left') {
+        let newStart = initialStart + deltaSeconds;
+
+        if (timelineEngine.isSnapping) {
+          newStart = timelineEngine.applySnappingToPoint(clip.id, newStart);
+        }
+
+        if (newStart < 0) newStart = 0;
+        let shift = newStart - initialStart;
+
+        if (initialDuration - shift < 0.15) {
+          shift = initialDuration - 0.15;
+          newStart = initialStart + shift;
+        }
+
+        if (initialTrimIn + shift < 0) {
+          shift = -initialTrimIn;
+          newStart = initialStart + shift;
+        }
+
+        clip.start = Math.max(0, Number(newStart.toFixed(3)));
+        clip.duration = Math.max(0.15, Number((initialDuration - shift).toFixed(3)));
+        clip.trimIn = Math.max(0, Number((initialTrimIn + shift).toFixed(3)));
+        hasChanged = true;
+        updateTooltip(e, `⏱ INICIO: ${clip.start.toFixed(2)}s | DUR: ${clip.duration.toFixed(2)}s`);
+      }
+
+      // Sync linked audio clip if present
+      for (const track of timelineEngine.tracks) {
+        if (track.type === 'audio') {
+          const linked = track.clips.find(c => c.sourceVideoClipId === clip.id);
+          if (linked) {
+            linked.start = clip.start;
+            linked.duration = clip.duration;
+            linked.trimIn = clip.trimIn;
+          }
+        }
+      }
+
+      timelineEngine.calculateTotalDuration();
+      timelineEngine.notify('trackschange');
       render();
     };
 
     const onMouseUp = () => {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      if (handleEl && handleEl.classList) {
+        handleEl.classList.remove('trimming');
+      }
+      if (trimTooltip) trimTooltip.style.display = 'none';
+
+      if (hasChanged) {
+        timelineEngine.pushState(`Recortar/Ampliar ${clip.name}`);
+        audioEngine.playBeep(520, 'square', 0.04);
+      }
     };
 
+    document.body.style.cursor = 'ew-resize';
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   }
