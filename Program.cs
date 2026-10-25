@@ -1893,6 +1893,14 @@ namespace KidCut
         public string FilePath { get { return _path; } }
         public double Seconds { get { return SampleRate > 0 ? (double)FramesWritten / SampleRate : 0; } }
 
+        // Wall-clock time (µs since the Unix epoch, same clock as FFmpeg's RTCTIME) of the first sample in the WAV
+        public long StartUs;
+
+        public static long NowUs()
+        {
+            return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).Ticks / 10;
+        }
+
         public WasapiCapture(bool loopback, string path)
         {
             _loopback = loopback;
@@ -1901,9 +1909,20 @@ namespace KidCut
 
         public bool Start()
         {
+            Begin();
+            return WaitReady();
+        }
+
+        // Begin + WaitReady lets system audio and microphone initialize in parallel
+        public void Begin()
+        {
             _thread = new Thread(Run) { IsBackground = true };
             _thread.SetApartmentState(ApartmentState.MTA);
             _thread.Start();
+        }
+
+        public bool WaitReady()
+        {
             _ready.WaitOne(4000);
             return Error == null;
         }
@@ -1963,6 +1982,7 @@ namespace KidCut
                     WriteWavHeader(fs, fmtBytes, 0);
                     client.Start();
                     _startQpc = Qpc100ns();
+                    StartUs = NowUs();
                     _ready.Set();
 
                     byte[] buf = new byte[SampleRate * blockAlign];
@@ -2120,6 +2140,23 @@ namespace KidCut
             return output;
         }
 
+        // First and last video packet times (s) as written, so absolute stamps survive and unfinalized files still work
+        public static bool ProbeVideoSpan(string path, out double first, out double last)
+        {
+            first = double.MaxValue;
+            last = double.MinValue;
+            string[] lines = Probe(string.Format("-select_streams v:0 -show_entries packet=pts_time -of csv=p=0 \"{0}\"", path))
+                .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string l in lines)
+            {
+                double d;
+                if (!double.TryParse(l.Trim().TrimEnd(','), NumberStyles.Float, CultureInfo.InvariantCulture, out d)) continue;
+                first = Math.Min(first, d);
+                last = Math.Max(last, d);
+            }
+            return last >= first;
+        }
+
         public static double ProbeDuration(string path)
         {
             double d;
@@ -2184,6 +2221,9 @@ namespace KidCut
         private class Take
         {
             public readonly Stopwatch Clock = new Stopwatch();
+            // Wall-clock origin (µs since epoch): video frames are stamped relative to it with FFmpeg's RTCTIME and
+            // each audio track knows its own start on the same clock, so sync never depends on when FFmpeg stops
+            public long OriginUs = WasapiCapture.NowUs();
             public readonly List<string> Segments = new List<string>();
             public readonly List<double> SegmentStarts = new List<double>(); // seconds on Clock
             public string Stamp;
@@ -2249,8 +2289,10 @@ namespace KidCut
                 // Audio starts first; the muxer trims its head so it lines up with the first video frame
                 take.Sys = captureSystem ? new WasapiCapture(true, Path.Combine(Program.ScratchDir, "rec_" + take.Stamp + "_sys.wav")) : null;
                 take.Mic = captureMic ? new WasapiCapture(false, Path.Combine(Program.ScratchDir, "rec_" + take.Stamp + "_mic.wav")) : null;
-                if (take.Sys != null && !take.Sys.Start()) { LastError = "Audio del sistema no disponible: " + take.Sys.Error; take.Sys = null; }
-                if (take.Mic != null && !take.Mic.Start()) { LastError = "Micrófono no disponible: " + take.Mic.Error; take.Mic = null; }
+                // Audio and screen start in parallel: sync comes from absolute wall-clock stamps, not from start order
+                Stopwatch timing = Stopwatch.StartNew();
+                if (take.Sys != null) take.Sys.Begin();
+                if (take.Mic != null) take.Mic.Begin();
 
                 take.Camera = captureCamera ? FindCamera() : null;
                 if (captureCamera && take.Camera == null) LastError = "No se encontró ninguna cámara; se graba sin cámara.";
@@ -2262,6 +2304,9 @@ namespace KidCut
                     take.Screen = screen;
                     if (LaunchSegment(take))
                     {
+                        if (take.Sys != null && !take.Sys.WaitReady()) { LastError = "Audio del sistema no disponible: " + take.Sys.Error; take.Sys = null; }
+                        if (take.Mic != null && !take.Mic.WaitReady()) { LastError = "Micrófono no disponible: " + take.Mic.Error; take.Mic = null; }
+                        Log(string.Format("Take started: capture and audio running after {0} ms", timing.ElapsedMilliseconds));
                         _take = take;
                         IsRecording = true;
                         new Thread(() => Watchdog(take)) { IsBackground = true, Name = "KidCut capture watchdog" }.Start();
@@ -2295,7 +2340,7 @@ namespace KidCut
                 _feed.Start();
             }
             double startedAt = take.Clock.Elapsed.TotalSeconds;
-            Process p = LaunchCapture(take.Screen[0], take.Screen[1], _feed, take.Fps, segment);
+            Process p = LaunchCapture(take.Screen[0], take.Screen[1], _feed, take.Fps, segment, take.OriginUs);
             if (p.WaitForExit(1500))
             {
                 lock (_ffmpegErr) take.Errors.AppendLine(_ffmpegErr.ToString());
@@ -2391,17 +2436,20 @@ namespace KidCut
             catch { }
         }
 
-        private static Process LaunchCapture(string screenInput, string screenFilter, CameraFeed feed, int fps, string output)
+        private static Process LaunchCapture(string screenInput, string screenFilter, CameraFeed feed, int fps, string output, long originUs)
         {
+            // Every frame is stamped with the wall-clock time it arrived, relative to the take's origin: segments and
+            // audio tracks then line up by absolute time (passthrough keeps those stamps; Finish makes the output CFR)
+            string stamp = string.Format(CultureInfo.InvariantCulture, "setpts=(RTCTIME-{0})/(TB*1000000)", originUs);
             string video;
             if (feed == null)
             {
-                video = screenFilter.Length > 0 ? string.Format("{0} -vf {1}", screenInput, screenFilter.TrimEnd(',')) : screenInput;
+                video = string.Format("{0} -vf \"{1}{2}\" -fps_mode passthrough", screenInput, screenFilter, stamp);
             }
             else
             {
-                // Same spot where the user last left the on-screen bubble (bottom-right by default). Both sources are
-                // stamped with their arrival wall-clock so overlay pairs them by real time.
+                // Same spot where the user last left the on-screen bubble (bottom-right by default); overlay pairs the
+                // screen and the piped camera by those same wall-clock stamps
                 Size cam = feed.Size;
                 Size phys = PhysicalScreenSize();
                 PointF frac = CameraBubble.PositionFraction(CameraStyle.Current);
@@ -2409,10 +2457,8 @@ namespace KidCut
                 int camY = Math.Max(0, Math.Min(phys.Height - cam.Height, (int)(frac.Y * phys.Height)));
                 video = string.Format(
                     "{0} -f rawvideo -pix_fmt bgra -video_size {1}x{2} -framerate 30 -i \"{3}\" -filter_complex \"" +
-                    "[0:v]{4}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000)[pip];" +
-                    // CFR on the output side: an fps filter could pad up to a stale EOF stamp on stop
-                    "[scr][pip]overlay={5}:{6}:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {7}",
-                    screenInput, cam.Width, cam.Height, feed.PipePath, screenFilter, camX, camY, fps);
+                    "[0:v]{4}{7}[scr];[1:v]{7}[pip];[scr][pip]overlay={5}:{6}:eof_action=repeat[v]\" -map \"[v]\" -fps_mode passthrough",
+                    screenInput, cam.Width, cam.Height, feed.PipePath, screenFilter, camX, camY, stamp);
             }
             // 1 s Matroska clusters: if the process dies, at most ~1 s of video is lost instead of several
             string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} -cluster_time_limit 1000 \"{3}\"", video, EncoderArgs(), fps * 2, output);
@@ -2482,20 +2528,27 @@ namespace KidCut
             try
             {
                 // Place each segment on the take's timeline; a gap left by a capture restart is filled with a still frame
+                // Frames carry wall-clock stamps relative to the take origin, so each segment's first/last packet says
+                // exactly where it sits on the timeline (also for a segment whose process was killed mid-write)
                 int n = take.Segments.Count;
-                double stopAt = take.Clock.Elapsed.TotalSeconds;
-                double[] dur = new double[n];
+                double frame = 1.0 / take.Fps;
+                double stopAt = take.Clock.Elapsed.TotalSeconds + 0.5; // the origin is taken just before the clock starts
+                double[] s0 = new double[n], s1 = new double[n];
                 for (int i = 0; i < n; i++)
                 {
-                    // A segment can never be longer than the time until the next one (or the stop); anything beyond is padding
-                    double limit = (i + 1 < n ? take.SegmentStarts[i + 1] : stopAt) - take.SegmentStarts[i];
-                    dur[i] = Math.Min(MediaTools.ProbeDuration(take.Segments[i]), limit + 0.5);
+                    double a, b;
+                    if (!MediaTools.ProbeVideoSpan(take.Segments[i], out a, out b)) continue;
+                    s0[i] = a;
+                    s1[i] = Math.Min(b + frame, stopAt);
                 }
                 // Segments with no frames are skipped; the next one's gap then covers their time
-                int[] valid = Enumerable.Range(0, n).Where(i => dur[i] > 0.05).ToArray();
+                int[] valid = Enumerable.Range(0, n).Where(i => s1[i] - s0[i] > 0.05).ToArray();
                 if (valid.Length == 0) throw new InvalidOperationException("La grabación de video quedó vacía.\n" + take.Errors);
+                for (int k = 1; k < valid.Length; k++) s1[valid[k - 1]] = Math.Min(s1[valid[k - 1]], s0[valid[k]]);
+                double[] dur = s1.Select((end, i) => end - s0[i]).ToArray();
                 int first = valid[0], lastSeg = valid[valid.Length - 1];
-                double videoSec = take.SegmentStarts[lastSeg] + dur[lastSeg] - take.SegmentStarts[first];
+                double videoStart = s0[first];
+                double videoSec = s1[lastSeg] - videoStart;
 
                 List<WasapiCapture> audio = new List<WasapiCapture>();
                 foreach (WasapiCapture a in new[] { take.Sys, take.Mic })
@@ -2512,7 +2565,7 @@ namespace KidCut
                 {
                     int i = valid[k];
                     args.AppendFormat("-i \"{0}\" ", take.Segments[i]);
-                    double gap = k == 0 ? 0 : take.SegmentStarts[i] - (take.SegmentStarts[valid[k - 1]] + dur[valid[k - 1]]);
+                    double gap = k == 0 ? 0 : s0[i] - s1[valid[k - 1]];
                     graph.AppendFormat(CultureInfo.InvariantCulture, "[{0}:v]trim=duration={1:0.000},setpts=PTS-STARTPTS{2}[v{0}];",
                         k, dur[i], gap > 0.05 ? string.Format(CultureInfo.InvariantCulture, ",tpad=start_duration={0:0.000}:start_mode=clone", gap) : "");
                 }
@@ -2522,8 +2575,10 @@ namespace KidCut
 
                 foreach (WasapiCapture a in audio)
                 {
-                    double lead = a.Seconds - videoSec; // audio began before the first video frame
+                    // Both clocks are absolute: skip the audio recorded before the first frame (or delay it if it began later)
+                    double lead = videoStart - (a.StartUs - take.OriginUs) / 1000000.0;
                     if (lead > 0) args.AppendFormat(CultureInfo.InvariantCulture, "-ss {0:0.000} ", lead);
+                    else if (lead < 0) args.AppendFormat(CultureInfo.InvariantCulture, "-itsoffset {0:0.000} ", -lead);
                     args.AppendFormat("-i \"{0}\" ", a.FilePath);
                 }
                 if (audio.Count == 2)
@@ -3298,7 +3353,7 @@ namespace KidCut
         // Live camera as raw BGR frames on stdout, already fitted, filtered and mirrored
         public static Process StartCamera(CameraStyle s, Size size, string camera, bool hd)
         {
-            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" -vf \"{2}\" -f rawvideo -pix_fmt bgr24 -",
+            string args = string.Format("-hide_banner -loglevel error -f dshow -rtbufsize 64M {0}-i \"video={1}\" -vf \"{2}\" -f rawvideo -pix_fmt bgr24 -",
                 hd ? HdMode : "", camera, CameraChain(s, size));
             Process p = new Process
             {
@@ -3313,6 +3368,8 @@ namespace KidCut
             p.ErrorDataReceived += (o, e) => { };
             p.Start();
             p.BeginErrorReadLine();
+            // Under a full CPU a normal-priority camera took 17 s to deliver 60 frames (and overflowed its buffer)
+            try { p.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
             return p;
         }
 
@@ -3648,7 +3705,7 @@ namespace KidCut
             PipePath = @"\\.\pipe\" + name;
             _pipe = new System.IO.Pipes.NamedPipeServerStream(name, System.IO.Pipes.PipeDirection.Out, 1,
                 System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.None, 0, _latest.Length * 2);
-            new Thread(WriteLoop) { IsBackground = true }.Start();
+            new Thread(WriteLoop) { IsBackground = true, Priority = ThreadPriority.Highest }.Start();
             StartCamera(true);
         }
 
@@ -3693,10 +3750,10 @@ namespace KidCut
                 });
                 if (!any && !_stop && _proc == p)
                 {
-                    if (hd) StartCamera(false); // camera without 720p
+                    if (hd) StartCamera(false); // camera without 640x360
                     else ScreenRecorder.LastError = "No se pudo abrir la cámara (¿la usa otra app?); se graba la silueta de ejemplo.";
                 }
-            }) { IsBackground = true }.Start();
+            }) { IsBackground = true, Priority = ThreadPriority.Highest }.Start();
         }
 
         public void Stop()
@@ -4351,7 +4408,7 @@ namespace KidCut
                 {
                     try { BeginInvoke((MethodInvoker)delegate { StartCamera(false); }); } catch { }
                 }
-            }) { IsBackground = true }.Start();
+            }) { IsBackground = true, Priority = ThreadPriority.AboveNormal }.Start();
         }
 
         private void StopCamera()
