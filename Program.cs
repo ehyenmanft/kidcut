@@ -1599,7 +1599,7 @@ namespace KidCut
                 {
                     int fps;
                     if (!int.TryParse(context.Request.QueryString["fps"], out fps) || (fps != 30 && fps != 60)) fps = 30;
-                    ScreenRecorder.Start(context.Request.QueryString["sys"] != "0", context.Request.QueryString["mic"] != "0", fps);
+                    ScreenRecorder.Start(context.Request.QueryString["sys"] != "0", context.Request.QueryString["mic"] != "0", context.Request.QueryString["cam"] == "1", fps);
                     SendJsonResponse(context, new { success = ScreenRecorder.IsRecording, warning = ScreenRecorder.LastError });
                     return;
                 }
@@ -2045,7 +2045,10 @@ namespace KidCut
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true
+                RedirectStandardError = true,
+                // FFmpeg prints UTF-8; the default OEM code page mangles names like "LifeCam®" or accented paths
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
             };
             StringBuilder outSb = new StringBuilder();
             StringBuilder errSb = new StringBuilder();
@@ -2144,7 +2147,32 @@ namespace KidCut
 
         public static TimeSpan Elapsed { get { return _clock.Elapsed; } }
 
+        private static string _camera;
+        private static bool _cameraSearched;
+
+        // First DirectShow video device (webcam), or null when there is none
+        public static string FindCamera()
+        {
+            if (_cameraSearched) return _camera;
+            try
+            {
+                if (!FfmpegEngine.IsAvailable) return null;
+                string output, error;
+                MediaTools.Run(FfmpegEngine.FfmpegPath, "-hide_banner -list_devices true -f dshow -i dummy", 15000, out output, out error);
+                Match m = Regex.Match(error ?? "", "\"([^\"]+)\" \\(video\\)");
+                _camera = m.Success ? m.Groups[1].Value : null;
+            }
+            catch { _camera = null; }
+            finally { _cameraSearched = true; }
+            return _camera;
+        }
+
         public static void Start(bool captureSystem, bool captureMic, int fps)
+        {
+            Start(captureSystem, captureMic, false, fps);
+        }
+
+        public static void Start(bool captureSystem, bool captureMic, bool captureCamera, int fps)
         {
             if (IsRecording || IsProcessing) return;
             if (!FfmpegEngine.IsAvailable) throw new InvalidOperationException("FFmpeg no fue encontrado en el sistema.");
@@ -2160,20 +2188,47 @@ namespace KidCut
             if (_sys != null && !_sys.Start()) { LastError = "Audio del sistema no disponible: " + _sys.Error; _sys = null; }
             if (_mic != null && !_mic.Start()) { LastError = "Micrófono no disponible: " + _mic.Error; _mic = null; }
 
-            _clock.Restart();
-            _ffmpeg = LaunchCapture(string.Format("-f lavfi -i ddagrab=output_idx=0:framerate={0}:draw_mouse=1 -vf hwdownload,format=bgra", fps), fps);
-            if (_ffmpeg.WaitForExit(1500))
+            // Desktop Duplication first; GDI capture when it is unavailable (remote desktop, old driver)
+            string[][] screens =
             {
-                // Desktop Duplication unavailable (remote desktop, old driver): fall back to GDI capture
-                _ffmpeg = LaunchCapture(string.Format("-f gdigrab -framerate {0} -draw_mouse 1 -i desktop", fps), fps);
-                if (_ffmpeg.WaitForExit(1500))
+                new[] { string.Format("-f lavfi -i ddagrab=output_idx=0:framerate={0}:draw_mouse=1", fps), "hwdownload,format=bgra," },
+                new[] { string.Format("-f gdigrab -framerate {0} -draw_mouse 1 -i desktop", fps), "" }
+            };
+            // Webcam at 720p, then at its default mode, and finally without camera so the take still happens
+            List<string> cameraModes = new List<string>();
+            string camera = captureCamera ? FindCamera() : null;
+            if (camera != null)
+            {
+                cameraModes.Add("-video_size 1280x720 -framerate 30 ");
+                cameraModes.Add("");
+            }
+            cameraModes.Add(null);
+
+            string cameraError = "";
+            foreach (string camMode in cameraModes)
+            {
+                foreach (string[] screen in screens)
                 {
-                    StopAudio();
-                    _clock.Reset();
-                    throw new InvalidOperationException("FFmpeg no pudo capturar la pantalla:\n" + _ffmpegErr);
+                    _clock.Restart();
+                    _ffmpeg = LaunchCapture(screen[0], screen[1], camMode == null ? null : camera, camMode, fps);
+                    if (!_ffmpeg.WaitForExit(camMode == null ? 1500 : 2500))
+                    {
+                        if (captureCamera && camMode == null)
+                        {
+                            LastError = camera == null
+                                ? "No se encontró ninguna cámara; se graba sin cámara."
+                                : "No se pudo abrir la cámara (¿la usa otra app?); se graba sin cámara.\n\n" + cameraError.Trim();
+                        }
+                        IsRecording = true;
+                        return;
+                    }
+                    _ffmpeg.WaitForExit(); // flush stderr
+                    if (camMode != null) lock (_ffmpegErr) cameraError = _ffmpegErr.ToString();
                 }
             }
-            IsRecording = true;
+            StopAudio();
+            _clock.Reset();
+            throw new InvalidOperationException("FFmpeg no pudo capturar la pantalla:\n" + _ffmpegErr);
         }
 
         public static void Stop()
@@ -2212,9 +2267,24 @@ namespace KidCut
             if (_mic != null) _mic.Join();
         }
 
-        private static Process LaunchCapture(string inputArgs, int fps)
+        private static Process LaunchCapture(string screenInput, string screenFilter, string camera, string cameraMode, int fps)
         {
-            string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} \"{3}\"", inputArgs, EncoderArgs(), fps * 2, _videoTemp);
+            string video;
+            if (camera == null)
+            {
+                video = screenFilter.Length > 0 ? string.Format("{0} -vf {1}", screenInput, screenFilter.TrimEnd(',')) : screenInput;
+            }
+            else
+            {
+                // Picture-in-picture bottom-right at 1/4 of the screen width. Both sources are stamped with their
+                // arrival wall-clock: their own clocks differ and overlay would otherwise stall waiting for the camera.
+                int camWidth = (PhysicalScreenSize().Width / 4) & ~1;
+                video = string.Format(
+                    "{0} -f dshow -rtbufsize 256M {1}-i \"video={2}\" -filter_complex \"[0:v]{3}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];" +
+                    "[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000),scale={4}:-2[cam];[scr][cam]overlay=W-w-24:H-h-24:eof_action=repeat,fps={5}[v]\" -map \"[v]\"",
+                    screenInput, cameraMode, camera, screenFilter, camWidth, fps);
+            }
+            string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} \"{3}\"", video, EncoderArgs(), fps * 2, _videoTemp);
             ProcessStartInfo psi = new ProcessStartInfo(FfmpegEngine.FfmpegPath, args)
             {
                 UseShellExecute = false,
@@ -2315,16 +2385,15 @@ namespace KidCut
         {
             Directory.CreateDirectory(RecordingsDir);
             string path = Path.Combine(RecordingsDir, "Captura_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".png");
-            // Physical pixels: the app is DPI-unaware, so capture with per-monitor awareness on this thread only
+            Size size = PhysicalScreenSize();
             IntPtr previous = IntPtr.Zero;
             try { previous = SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { }
             try
             {
-                int w = GetSystemMetrics(0), h = GetSystemMetrics(1);
-                using (Bitmap bmp = new Bitmap(w, h))
+                using (Bitmap bmp = new Bitmap(size.Width, size.Height))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
-                    g.CopyFromScreen(0, 0, 0, 0, new Size(w, h));
+                    g.CopyFromScreen(0, 0, 0, 0, size);
                     bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                 }
             }
@@ -2333,6 +2402,21 @@ namespace KidCut
                 if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
             }
             return path;
+        }
+
+        // Primary screen in physical pixels: the app is DPI-unaware, so query with per-monitor awareness on this thread only
+        private static Size PhysicalScreenSize()
+        {
+            IntPtr previous = IntPtr.Zero;
+            try { previous = SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { }
+            try
+            {
+                return new Size(GetSystemMetrics(0), GetSystemMetrics(1));
+            }
+            finally
+            {
+                if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
+            }
         }
     }
 
@@ -2357,12 +2441,16 @@ namespace KidCut
         private readonly Button _btnRec;
         private readonly Button _btnSys;
         private readonly Button _btnMic;
+        private readonly Button _btnCam;
         private readonly Button _btnFps;
+        private readonly Button _btnList;
         private readonly Label _lblTime;
         private readonly ToolTip _tips = new ToolTip();
         private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
         private bool _sysOn = true;
         private bool _micOn = true;
+        private bool _camOn;
+        private volatile bool _camSearched;
         private int _fps = 30;
         private volatile bool _starting;
         private string _shownError;
@@ -2377,7 +2465,7 @@ namespace KidCut
             TopMost = true;
             ShowInTaskbar = false;
             BackColor = Color.FromArgb(14, 10, 28);
-            Size = new Size(460, 44);
+            Size = new Size(540, 44);
             Opacity = 0.95;
             StartPosition = FormStartPosition.Manual;
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -2420,10 +2508,19 @@ namespace KidCut
             AddButton("📷", "Captura de pantalla (PNG sin pérdida)", 208, 40, TakeShot);
             _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 250, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
             _btnMic = AddButton("🎙", "Grabar el micrófono", 292, 40, () => { _micOn = !_micOn; RefreshToggles(); });
-            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 334, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
-            AddButton("✂", "Abrir el editor KidCut", 372, 40, () => Program.OpenInBrowser(Program.TargetUrl));
-            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 414, 40, Hide);
+            _btnCam = AddButton("📹", "Buscando cámara...", 334, 40, () => { _camOn = !_camOn; RefreshToggles(); });
+            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 376, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
+            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 414, 40, ShowRecordingsMenu);
+            AddButton("✂", "Abrir el editor KidCut", 456, 40, () => Program.OpenInBrowser(Program.TargetUrl));
+            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 498, 40, Hide);
             RefreshToggles();
+
+            // Probing DirectShow takes ~1 s, so the camera button enables itself once a webcam is found
+            new Thread(() =>
+            {
+                try { ScreenRecorder.FindCamera(); } catch { }
+                _camSearched = true;
+            }) { IsBackground = true }.Start();
 
             FormClosing += (s, e) =>
             {
@@ -2472,7 +2569,33 @@ namespace KidCut
             _btnSys.BackColor = _sysOn ? OnColor : OffColor;
             _btnMic.BackColor = _micOn ? OnColor : OffColor;
             _btnSys.Text = _sysOn ? "🔊" : "🔇";
+            _btnCam.BackColor = _camOn ? OnColor : OffColor;
             _btnFps.Text = _fps.ToString();
+        }
+
+        private void ShowRecordingsMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            FileInfo[] files = Directory.Exists(ScreenRecorder.RecordingsDir)
+                ? new DirectoryInfo(ScreenRecorder.RecordingsDir).GetFiles()
+                : new FileInfo[0];
+            Array.Sort(files, (a, b) => b.LastWriteTime.CompareTo(a.LastWriteTime));
+            foreach (FileInfo f in files.Take(15))
+            {
+                string path = f.FullName;
+                bool isImage = Regex.IsMatch(f.Extension, @"^\.(png|jpe?g|webp|bmp)$", RegexOptions.IgnoreCase);
+                string label = string.Format("{0}  {1}  ·  {2:0.0} MB  ·  {3:dd/MM HH:mm}", isImage ? "📷" : "🎬", f.Name, f.Length / 1048576.0, f.LastWriteTime);
+                menu.Items.Add(label, null, (s, e) =>
+                {
+                    try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); } catch { }
+                });
+            }
+            if (files.Length == 0) menu.Items.Add("Aún no hay grabaciones").Enabled = false;
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("📁 Abrir carpeta de grabaciones", null, (s, e) => OpenRecordingsFolder());
+            menu.Items.Add("✂ Editar en KidCut", null, (s, e) => Program.OpenInBrowser(Program.TargetUrl));
+            menu.Closed += (s, e) => BeginInvoke((MethodInvoker)menu.Dispose);
+            menu.Show(_btnList, new Point(0, _btnList.Height));
         }
 
         private void DragWindow(object sender, MouseEventArgs e)
@@ -2497,11 +2620,11 @@ namespace KidCut
                 return;
             }
             _starting = true;
-            bool sys = _sysOn, mic = _micOn;
+            bool sys = _sysOn, mic = _micOn, cam = _camOn && _btnCam.Enabled;
             int fps = _fps;
             new Thread(() =>
             {
-                try { ScreenRecorder.Start(sys, mic, fps); }
+                try { ScreenRecorder.Start(sys, mic, cam, fps); }
                 catch (Exception ex) { ScreenRecorder.LastError = ex.Message; }
                 finally { _starting = false; }
             }) { IsBackground = true }.Start();
@@ -2540,6 +2663,12 @@ namespace KidCut
             _btnRec.Text = rec ? "■ STOP" : "● REC";
             _btnRec.Enabled = !busy;
             _btnSys.Enabled = _btnMic.Enabled = _btnFps.Enabled = !rec && !busy;
+            bool hasCamera = _camSearched && ScreenRecorder.FindCamera() != null;
+            _btnCam.Enabled = hasCamera && !rec && !busy;
+            string camTip = !_camSearched ? "Buscando cámara..."
+                : hasCamera ? "Grabar también la cámara (" + ScreenRecorder.FindCamera() + ") en una esquina"
+                : "No se encontró ninguna cámara";
+            if (_tips.GetToolTip(_btnCam) != camTip) _tips.SetToolTip(_btnCam, camTip);
 
             if (ScreenRecorder.LastOutput != null && ScreenRecorder.LastOutput != _shownOutput)
             {
