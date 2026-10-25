@@ -2286,13 +2286,22 @@ namespace KidCut
                 string border = Path.Combine(Program.ScratchDir, "rec_cam_border.png");
                 using (Bitmap m = CameraFrames.RenderMask(style, cam)) m.Save(mask, ImageFormat.Png);
                 using (Bitmap b = CameraFrames.RenderBorder(style, cam)) b.Save(border, ImageFormat.Png);
+                string extraInputs = "";
+                if (CameraFrames.UsesPlate(style)) extraInputs += string.Format("-i \"{0}\" ", CameraFrames.PlatePath);
+                if (CameraFrames.UsesBackgroundImage(style))
+                {
+                    string bg = Path.Combine(Program.ScratchDir, "rec_cam_background.png");
+                    using (Bitmap b = CameraFrames.RenderBackground(style.Background, style.Colors, cam)) b.Save(bg, ImageFormat.Png);
+                    extraInputs += string.Format("-i \"{0}\" ", bg);
+                }
+                string camGraph = CameraFrames.Graph(style, cam, "[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000),", "[4:v]", "[5:v]", "c0");
                 video = string.Format(
-                    "{0} -f dshow -rtbufsize 256M {1}-i \"video={2}\" -i \"{3}\" -i \"{4}\" -filter_complex \"" +
-                    "[0:v]{5}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];" +
-                    "[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000),{6},format=yuva420p[c];[2:v]format=gray[m];[c][m]alphamerge[cm];" +
+                    "{0} -f dshow -rtbufsize 256M {1}-i \"video={2}\" -i \"{3}\" -i \"{4}\" {5}-filter_complex \"" +
+                    "[0:v]{6}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];{7};" +
+                    "[c0]format=yuva420p[c];[2:v]format=gray[m];[c][m]alphamerge[cm];" +
                     // CFR on the output side: an fps filter would pad up to the camera's EOF stamp (its own device clock) on stop
-                    "[cm][3:v]overlay=0:0[pip];[scr][pip]overlay=W-w-24:H-h-24:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {7}",
-                    screenInput, cameraMode, camera, mask, border, screenFilter, CameraFrames.FfmpegFilter(style, cam), fps);
+                    "[cm][3:v]overlay=0:0[pip];[scr][pip]overlay=W-w-24:H-h-24:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {8}",
+                    screenInput, cameraMode, camera, mask, border, extraInputs, screenFilter, camGraph, fps);
             }
             string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} \"{3}\"", video, EncoderArgs(), fps * 2, _videoTemp);
             try
@@ -2451,6 +2460,8 @@ namespace KidCut
         public string Border { get; set; }
         public string Filter { get; set; }
         public string[] Colors { get; set; } // one color = solid, more = gradient stops
+        public string Background { get; set; }
+        public bool Mirror { get; set; }
 
         public static readonly CameraStyle Current = Load();
 
@@ -2472,6 +2483,7 @@ namespace KidCut
             if (!CameraFrames.Has(CameraFrames.Shapes, s.Shape)) s.Shape = "circle";
             if (!CameraFrames.Has(CameraFrames.Borders, s.Border)) s.Border = "solid";
             if (!CameraFrames.Has(CameraFrames.Filters, s.Filter)) s.Filter = "none";
+            if (!CameraFrames.Has(CameraFrames.Backgrounds, s.Background)) s.Background = "none";
             if (s.Colors == null || s.Colors.Length == 0 || s.Colors.Length > 8 || !s.Colors.All(CameraFrames.IsHexColor))
             {
                 s.Colors = new[] { "#FF2244", "#FFD200" };
@@ -2512,8 +2524,60 @@ namespace KidCut
             new[] { "cool", "Frío", "colorbalance=rs=-0.12:bs=0.22" },
             new[] { "vintage", "Vintage", "curves=preset=vintage" },
             new[] { "contrast", "Alto contraste", "eq=contrast=1.45:brightness=0.03:saturation=1.1" },
-            new[] { "pixel", "Pixel 8-bit", "scale={0}/12:-2:flags=area,scale={0}:{1}:flags=neighbor" }
+            new[] { "pixel", "Pixel 8-bit", "scale={0}/5:-2:flags=area,scale={0}:{1}:flags=neighbor" }
         };
+
+        // "none" keeps the real room; every other one replaces it using the empty-room capture (PlatePath)
+        public static readonly string[][] Backgrounds =
+        {
+            new[] { "none", "Sin fondo (real)" }, new[] { "blur", "Desenfocado" }, new[] { "studio", "Estudio" },
+            new[] { "frame", "Colores del marco" }, new[] { "sunset", "Atardecer" }, new[] { "ocean", "Océano" },
+            new[] { "synthwave", "Synthwave" }, new[] { "night", "Noche estrellada" }, new[] { "galaxy", "Galaxia" },
+            new[] { "aurora", "Aurora" }, new[] { "bokeh", "Bokeh" }, new[] { "matrix", "Matrix" },
+            new[] { "pixelland", "Paisaje 8-bit" }, new[] { "bricks", "Ladrillos" }, new[] { "wood", "Madera" },
+            new[] { "checker", "Damero" }, new[] { "dots", "Lunares" }, new[] { "stripes", "Rayas" },
+            new[] { "notebook", "Cuaderno" }, new[] { "confetti", "Confeti" }, new[] { "hearts", "Corazones" },
+            new[] { "clouds", "Cielo" }, new[] { "city", "Ciudad neón" }, new[] { "forest", "Bosque" },
+            new[] { "mosaic", "Mosaico 8-bit" }
+        };
+
+        // Empty-room snapshot at the camera's native size; the person is whatever differs from it
+        public static string PlatePath
+        {
+            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "kidcut_camera_plate.png"); }
+        }
+
+        public static bool UsesPlate(CameraStyle s)
+        {
+            return s.Background != "none" && File.Exists(PlatePath);
+        }
+
+        public static bool UsesBackgroundImage(CameraStyle s)
+        {
+            return UsesPlate(s) && s.Background != "blur";
+        }
+
+        // Camera processing graph: fit to canvas, optional background replacement, color filter and mirror.
+        // camIn includes the input label and any prefix filters; plateIn/bgIn are input labels (used only when needed).
+        public static string Graph(CameraStyle s, Size size, string camIn, string plateIn, string bgIn, string outLabel)
+        {
+            string fit = string.Format("scale={0}:{1}:force_original_aspect_ratio=increase,crop={0}:{1}", size.Width, size.Height);
+            string extra = Filters.First(r => r[0] == s.Filter)[2];
+            string post = (extra.Length > 0 ? "," + string.Format(extra, size.Width, size.Height) : "") + (s.Mirror ? ",hflip" : "");
+            if (!UsesPlate(s)) return string.Format("{0}{1},format=rgb24{2}[{3}]", camIn, fit, post, outLabel);
+
+            StringBuilder g = new StringBuilder();
+            g.AppendFormat("{0}{1},format=rgb24,split=3[k0][k1][k2];", camIn, fit);
+            g.AppendFormat("{0}{1},format=rgb24[pl];", plateIn, fit);
+            // Person mask = pixels that differ from the empty room; erosion drops sensor noise, dilation fills holes, blur softens edges
+            g.Append("[k0][pl]blend=all_mode=difference,format=gray,lut=c0='if(gt(val,28),255,0)',erosion,dilation,dilation,dilation,gblur=sigma=3[pm];");
+            g.Append("[k1]format=rgba[kp];[kp][pm]alphamerge[person];");
+            if (s.Background == "blur") g.Append("[k2]gblur=sigma=18[bg];");
+            // The still image is laid over the live feed so the background stream keeps the camera's timing
+            else g.AppendFormat("{0}scale={1}:{2},format=rgb24[bimg];[k2][bimg]overlay=0:0:eof_action=repeat[bg];", bgIn, size.Width, size.Height);
+            g.AppendFormat("[bg][person]overlay=0:0,format=rgb24{0}[{1}]", post, outLabel);
+            return g.ToString();
+        }
 
         public static readonly string[][] Palettes =
         {
@@ -2539,14 +2603,6 @@ namespace KidCut
         {
             width &= ~1;
             return s.Shape == "rect" ? new Size(width, (width * 9 / 16) & ~1) : new Size(width, width);
-        }
-
-        // Scale/crop the camera to the canvas, then apply the color filter
-        public static string FfmpegFilter(CameraStyle s, Size size)
-        {
-            string f = string.Format("scale={0}:{1}:force_original_aspect_ratio=increase,crop={0}:{1}", size.Width, size.Height);
-            string extra = Filters.First(r => r[0] == s.Filter)[2];
-            return extra.Length == 0 ? f : f + "," + string.Format(extra, size.Width, size.Height);
         }
 
         private static float Thickness(Size sz)
@@ -2788,6 +2844,311 @@ namespace KidCut
             }
         }
 
+        private static Color Hex(string c)
+        {
+            return ColorTranslator.FromHtml(c);
+        }
+
+        private static void FillVertical(Graphics g, RectangleF r, params string[] colors)
+        {
+            Color[] cs = colors.Select(Hex).ToArray();
+            using (LinearGradientBrush b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), cs[0], cs[cs.Length - 1], 90f))
+            {
+                if (cs.Length > 2)
+                {
+                    ColorBlend blend = new ColorBlend(cs.Length);
+                    blend.Colors = cs;
+                    blend.Positions = Enumerable.Range(0, cs.Length).Select(i => (float)i / (cs.Length - 1)).ToArray();
+                    b.InterpolationColors = blend;
+                }
+                g.FillRectangle(b, r);
+            }
+        }
+
+        private static void Stars(Graphics g, Random rnd, int w, int h, int count, float maxR)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float r = 0.4f + (float)rnd.NextDouble() * maxR;
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(120 + rnd.Next(135), 255, 255, 255)))
+                {
+                    g.FillEllipse(b, (float)rnd.NextDouble() * w, (float)rnd.NextDouble() * h, r, r);
+                }
+            }
+        }
+
+        private static void Glow(Graphics g, float cx, float cy, float r, Color c)
+        {
+            using (GraphicsPath p = new GraphicsPath())
+            {
+                p.AddEllipse(cx - r, cy - r, 2 * r, 2 * r);
+                using (PathGradientBrush pb = new PathGradientBrush(p) { CenterColor = c, SurroundColors = new[] { Color.FromArgb(0, c) } })
+                {
+                    g.FillPath(pb, p);
+                }
+            }
+        }
+
+        // Virtual backgrounds, drawn at any size; colors = the frame's colors (used by "frame")
+        public static Bitmap RenderBackground(string id, string[] colors, Size sz)
+        {
+            int w = sz.Width, h = sz.Height;
+            float u = Math.Min(w, h) / 100f;
+            RectangleF all = new RectangleF(0, 0, w, h);
+            Random rnd = new Random(11);
+            Bitmap bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+            using (Graphics g = HighQuality(bmp))
+            {
+                switch (id)
+                {
+                    case "blur": // only the designer thumbnail; recording blurs the real room
+                        g.Clear(Color.FromArgb(90, 80, 70));
+                        for (int i = 0; i < 6; i++) Glow(g, rnd.Next(w), rnd.Next(h), 30 * u, Color.FromArgb(200, rnd.Next(256), rnd.Next(256), rnd.Next(256)));
+                        break;
+                    case "studio":
+                        g.Clear(Color.FromArgb(55, 58, 64));
+                        Glow(g, w / 2f, h * 0.45f, Math.Max(w, h) * 0.75f, Color.FromArgb(255, 205, 208, 214));
+                        break;
+                    case "frame":
+                        using (Brush b = MakeBrush(colors, all, 255)) g.FillRectangle(b, all);
+                        Glow(g, w * 0.3f, h * 0.3f, 60 * u, Color.FromArgb(90, 255, 255, 255));
+                        break;
+                    case "sunset":
+                        FillVertical(g, all, "#2E1A47", "#C33764", "#FF7E5F", "#FEB47B");
+                        Glow(g, w / 2f, h * 0.72f, 30 * u, Color.FromArgb(255, 255, 236, 140));
+                        g.FillRectangle(new SolidBrush(Color.FromArgb(40, 20, 50)), 0, h * 0.8f, w, h * 0.2f);
+                        break;
+                    case "ocean":
+                        FillVertical(g, all, "#9BE7FF", "#2F80ED", "#0B3C8C");
+                        for (int k = 0; k < 6; k++)
+                        {
+                            PointF[] wave = Enumerable.Range(0, 41).Select(i => new PointF(i * w / 40f, h * (0.5f + k * 0.09f) + (float)Math.Sin(i * 0.6 + k) * 2 * u)).ToArray();
+                            using (Pen p = new Pen(Color.FromArgb(110, 255, 255, 255), u)) g.DrawCurve(p, wave);
+                        }
+                        break;
+                    case "synthwave":
+                        FillVertical(g, all, "#1A0B3D", "#5B1A8E", "#E0418F");
+                        float horizon = h * 0.62f;
+                        using (GraphicsPath sun = new GraphicsPath())
+                        {
+                            sun.AddEllipse(w / 2f - 24 * u, horizon - 42 * u, 48 * u, 48 * u);
+                            using (LinearGradientBrush sb = new LinearGradientBrush(sun.GetBounds(), Hex("#FFE66D"), Hex("#FF3D7F"), 90f)) g.FillPath(sb, sun);
+                        }
+                        for (int i = 0; i < 6; i++) g.FillRectangle(new SolidBrush(Hex("#5B1A8E")), 0, horizon - (14 - i * 2.4f) * u, w, (0.6f + i * 0.35f) * u);
+                        g.FillRectangle(new SolidBrush(Hex("#12062B")), 0, horizon, w, h - horizon);
+                        using (Pen grid = new Pen(Hex("#FF4FD8"), Math.Max(1, 0.5f * u)))
+                        {
+                            for (int i = -12; i <= 12; i++) g.DrawLine(grid, w / 2f, horizon, w / 2f + i * w / 6f, h);
+                            for (int i = 1; i < 10; i++)
+                            {
+                                float y = horizon + (h - horizon) * (float)Math.Pow(i / 9.0, 1.8);
+                                g.DrawLine(grid, 0, y, w, y);
+                            }
+                        }
+                        break;
+                    case "night":
+                        FillVertical(g, all, "#050A1F", "#1B2A55", "#3A4A7A");
+                        Stars(g, rnd, w, h, 180, 1.4f * u);
+                        g.FillEllipse(new SolidBrush(Hex("#F4F1C9")), w * 0.72f, h * 0.12f, 16 * u, 16 * u);
+                        g.FillEllipse(new SolidBrush(Hex("#1B2A55")), w * 0.72f + 5 * u, h * 0.12f - 2 * u, 15 * u, 15 * u);
+                        break;
+                    case "galaxy":
+                        g.Clear(Hex("#05010F"));
+                        string[] neb = { "#7B2FF7", "#F107A3", "#00C9FF", "#5D26C1", "#FF6A88", "#2E86DE" };
+                        for (int i = 0; i < 9; i++) Glow(g, rnd.Next(w), rnd.Next(h), (18 + rnd.Next(30)) * u, Color.FromArgb(110, Hex(neb[i % neb.Length])));
+                        Stars(g, rnd, w, h, 220, 1.2f * u);
+                        break;
+                    case "aurora":
+                        FillVertical(g, all, "#020B14", "#06263A", "#0B3D3A");
+                        Stars(g, rnd, w, h / 2, 90, 1f * u);
+                        string[] aur = { "#3CF0A0", "#26C6DA", "#B388FF" };
+                        for (int k = 0; k < 3; k++)
+                        {
+                            PointF[] band = Enumerable.Range(0, 9).Select(i => new PointF(i * w / 8f, h * (0.25f + k * 0.1f) + (float)Math.Sin(i * 0.9 + k * 2) * 8 * u)).ToArray();
+                            using (Pen p = new Pen(Color.FromArgb(70, Hex(aur[k])), 14 * u)) g.DrawCurve(p, band);
+                            using (Pen p = new Pen(Color.FromArgb(120, Hex(aur[k])), 4 * u)) g.DrawCurve(p, band);
+                        }
+                        break;
+                    case "bokeh":
+                        g.Clear(Hex("#15122B"));
+                        for (int i = 0; i < 40; i++)
+                        {
+                            float r = (4 + rnd.Next(12)) * u;
+                            Color c = Color.FromArgb(60 + rnd.Next(80), 120 + rnd.Next(136), 80 + rnd.Next(176), 120 + rnd.Next(136));
+                            g.FillEllipse(new SolidBrush(c), rnd.Next(w) - r, rnd.Next(h) - r, 2 * r, 2 * r);
+                        }
+                        break;
+                    case "matrix":
+                        g.Clear(Color.Black);
+                        string glyphs = "01アイウエオカキクケコサシスセソ";
+                        using (Font f = new Font("MS Gothic", Math.Max(5f, 4.2f * u), FontStyle.Bold, GraphicsUnit.Pixel))
+                        {
+                            for (float x = 0; x < w; x += 5 * u)
+                            {
+                                int len = 4 + rnd.Next(18);
+                                float start = rnd.Next(h);
+                                for (int i = 0; i < len; i++)
+                                {
+                                    int a = i == len - 1 ? 255 : 40 + 200 * i / len;
+                                    Color c = i == len - 1 ? Color.FromArgb(a, 200, 255, 200) : Color.FromArgb(a, 0, 255, 70);
+                                    g.DrawString(glyphs[rnd.Next(glyphs.Length)].ToString(), f, new SolidBrush(c), x, (start + i * 5 * u) % h);
+                                }
+                            }
+                        }
+                        break;
+                    case "pixelland":
+                        g.SmoothingMode = SmoothingMode.None;
+                        g.Clear(Hex("#5C94FC"));
+                        float px = 5 * u;
+                        float[] hills = { 52, 46, 40, 38, 44, 50, 56, 50, 44, 36, 30, 34, 42, 48, 54, 58, 52, 46, 50, 56, 60 };
+                        for (int i = 0; i * px < w; i++)
+                        {
+                            float top = hills[i % hills.Length] * u;
+                            g.FillRectangle(new SolidBrush(Hex("#2E8B57")), i * px, top, px + 1, h);
+                            g.FillRectangle(new SolidBrush(Hex("#3CB371")), i * px, top, px + 1, px);
+                        }
+                        g.FillRectangle(new SolidBrush(Hex("#C84C0C")), 0, 82 * u, w, h);
+                        for (int i = 0; i * px < w; i++) g.FillRectangle(new SolidBrush(i % 2 == 0 ? Hex("#FC9838") : Hex("#E45C10")), i * px, 82 * u, px, px);
+                        for (int c = 0; c < 3; c++)
+                        {
+                            float cx = (15 + c * 33) * u, cy = (10 + c % 2 * 8) * u;
+                            g.FillRectangle(Brushes.White, cx, cy, 4 * px, px);
+                            g.FillRectangle(Brushes.White, cx + px, cy - px, 2 * px, px);
+                        }
+                        break;
+                    case "bricks":
+                        g.Clear(Hex("#B9A894"));
+                        float bw = 20 * u, bh = 8 * u, gap = Math.Max(1, 0.9f * u);
+                        for (int row = 0; row * bh < h; row++)
+                        {
+                            float off = row % 2 == 0 ? 0 : -bw / 2;
+                            for (float x = off; x < w; x += bw)
+                            {
+                                Color c = Color.FromArgb(150 + rnd.Next(30), 60 + rnd.Next(20), 40 + rnd.Next(15));
+                                g.FillRectangle(new SolidBrush(c), x + gap, row * bh + gap, bw - 2 * gap, bh - 2 * gap);
+                            }
+                        }
+                        break;
+                    case "wood":
+                        float plank = 16 * u;
+                        for (int i = 0; i * plank < w; i++)
+                        {
+                            Color c = Color.FromArgb(130 + rnd.Next(30), 82 + rnd.Next(20), 45 + rnd.Next(12));
+                            g.FillRectangle(new SolidBrush(c), i * plank, 0, plank, h);
+                            using (Pen grain = new Pen(Color.FromArgb(50, 60, 30, 10), Math.Max(1, 0.5f * u)))
+                            {
+                                for (int k = 0; k < 4; k++)
+                                {
+                                    float gx = i * plank + (2 + k * 3.5f) * u;
+                                    PointF[] line = Enumerable.Range(0, 11).Select(j => new PointF(gx + (float)Math.Sin(j * 0.9 + k + i) * u, j * h / 10f)).ToArray();
+                                    g.DrawCurve(grain, line);
+                                }
+                            }
+                            g.DrawLine(new Pen(Color.FromArgb(120, 40, 20, 5), Math.Max(1, 0.6f * u)), i * plank, 0, i * plank, h);
+                        }
+                        break;
+                    case "checker":
+                        float sq = 12 * u;
+                        for (int y = 0; y * sq < h; y++)
+                            for (int x = 0; x * sq < w; x++)
+                                g.FillRectangle(new SolidBrush((x + y) % 2 == 0 ? Hex("#FFD6E8") : Hex("#C8E7FF")), x * sq, y * sq, sq + 1, sq + 1);
+                        break;
+                    case "dots":
+                        g.Clear(Hex("#FFE3EC"));
+                        float step = 12 * u, dr = 3.2f * u;
+                        for (int y = 0; y * step < h + step; y++)
+                            for (int x = 0; x * step < w + step; x++)
+                                g.FillEllipse(new SolidBrush(Hex("#FF8FB1")), x * step + (y % 2) * step / 2 - dr, y * step - dr, 2 * dr, 2 * dr);
+                        break;
+                    case "stripes":
+                        g.Clear(Hex("#FFF4C2"));
+                        using (SolidBrush sb = new SolidBrush(Hex("#FFB347")))
+                        {
+                            g.RotateTransform(-35);
+                            for (float x = -2 * Math.Max(w, h); x < 2 * Math.Max(w, h); x += 14 * u) g.FillRectangle(sb, x, -2 * h, 7 * u, 5 * h);
+                            g.ResetTransform();
+                        }
+                        break;
+                    case "notebook":
+                        g.Clear(Hex("#FDFDF6"));
+                        using (Pen line = new Pen(Hex("#9CC3E6"), Math.Max(1, 0.4f * u)))
+                            for (float y = 10 * u; y < h; y += 6 * u) g.DrawLine(line, 0, y, w, y);
+                        g.DrawLine(new Pen(Hex("#F28B82"), Math.Max(1, 0.6f * u)), 14 * u, 0, 14 * u, h);
+                        break;
+                    case "confetti":
+                        g.Clear(Hex("#FFFBF2"));
+                        string[] conf = { "#FF595E", "#FFCA3A", "#8AC926", "#1982C4", "#6A4C93", "#FF7AC6" };
+                        for (int i = 0; i < 160; i++)
+                        {
+                            g.TranslateTransform(rnd.Next(w), rnd.Next(h));
+                            g.RotateTransform(rnd.Next(360));
+                            g.FillRectangle(new SolidBrush(Hex(conf[rnd.Next(conf.Length)])), -1.5f * u, -0.7f * u, 3 * u, 1.4f * u);
+                            g.ResetTransform();
+                        }
+                        break;
+                    case "hearts":
+                        g.Clear(Hex("#FFD1DC"));
+                        float hs = 14 * u;
+                        for (int y = 0; y * hs < h + hs; y++)
+                            for (int x = 0; x * hs < w + hs; x++)
+                                using (GraphicsPath hp = ShapePath("heart", new RectangleF(x * hs + (y % 2) * hs / 2, y * hs, hs * 0.6f, hs * 0.6f)))
+                                    g.FillPath(new SolidBrush(Hex("#FF6F91")), hp);
+                        break;
+                    case "clouds":
+                        FillVertical(g, all, "#4FA3E0", "#A7D8F5", "#E8F6FF");
+                        for (int c = 0; c < 6; c++)
+                        {
+                            float cx = rnd.Next(w), cy = rnd.Next(h * 2 / 3);
+                            for (int k = 0; k < 5; k++)
+                            {
+                                float r = (6 + rnd.Next(6)) * u;
+                                g.FillEllipse(new SolidBrush(Color.FromArgb(230, 255, 255, 255)), cx + (k - 2) * 6 * u - r, cy + rnd.Next(4) * u - r, 2 * r, 2 * r);
+                            }
+                        }
+                        break;
+                    case "city":
+                        FillVertical(g, all, "#0F0C29", "#302B63", "#24243E");
+                        Stars(g, rnd, w, h / 2, 60, 0.8f * u);
+                        for (float x = 0; x < w; )
+                        {
+                            float bwid = (8 + rnd.Next(12)) * u, bht = (25 + rnd.Next(45)) * u;
+                            g.FillRectangle(new SolidBrush(Hex("#0B0A1A")), x, h - bht, bwid, bht);
+                            for (float wy = h - bht + 2 * u; wy < h - 2 * u; wy += 4 * u)
+                                for (float wx = x + 1.5f * u; wx < x + bwid - 2 * u; wx += 3.5f * u)
+                                    if (rnd.Next(3) == 0) g.FillRectangle(new SolidBrush(rnd.Next(2) == 0 ? Hex("#FFD86B") : Hex("#4DEEEA")), wx, wy, 1.6f * u, 2 * u);
+                            x += bwid + u;
+                        }
+                        g.FillRectangle(new SolidBrush(Hex("#FF2E97")), 0, h - 1.2f * u, w, 1.2f * u);
+                        break;
+                    case "forest":
+                        FillVertical(g, all, "#D4F1F4", "#A8E6CF", "#5AA469");
+                        string[] greens = { "#7FB685", "#3E8E5E", "#1E5631" };
+                        for (int layer = 0; layer < 3; layer++)
+                        {
+                            float th = (30 + layer * 14) * u, base0 = h - (2 - layer) * 8 * u;
+                            for (float x = -10 * u + layer * 4 * u; x < w + 10 * u; x += (9 - layer) * u)
+                            {
+                                float hh = th * (0.7f + (float)rnd.NextDouble() * 0.4f);
+                                g.FillPolygon(new SolidBrush(Hex(greens[layer])), new[] { new PointF(x, base0), new PointF(x + 5 * u, base0 - hh), new PointF(x + 10 * u, base0) });
+                            }
+                        }
+                        break;
+                    case "mosaic":
+                        g.SmoothingMode = SmoothingMode.None;
+                        string[] pal = { "#1D2B53", "#7E2553", "#008751", "#AB5236", "#5F574F", "#FF004D", "#FFA300", "#29ADFF", "#83769C", "#FF77A8" };
+                        float cell = 8 * u;
+                        for (int y = 0; y * cell < h; y++)
+                            for (int x = 0; x * cell < w; x++)
+                                g.FillRectangle(new SolidBrush(Hex(pal[rnd.Next(pal.Length)])), x * cell, y * cell, cell + 1, cell + 1);
+                        break;
+                    default:
+                        g.Clear(Color.FromArgb(40, 40, 48));
+                        break;
+                }
+            }
+            return bmp;
+        }
+
         // Designer helpers: shape icon and color swatch
         public static Bitmap RenderShapeIcon(string shape, int size, Color color)
         {
@@ -2838,6 +3199,10 @@ namespace KidCut
         private Size _canvas;
         private Process _camProcess;
         private volatile bool _closing;
+        private readonly Button _btnMirror;
+        private readonly Button _btnPlate;
+        private int _countdown;
+        private System.Windows.Forms.Timer _countdownTimer;
 
         public static void ShowDesigner()
         {
@@ -2859,7 +3224,7 @@ namespace KidCut
             TopMost = true;
             BackColor = Bg;
             ForeColor = Color.White;
-            ClientSize = new Size(900, 600);
+            ClientSize = new Size(900, 720);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9);
 
@@ -2908,19 +3273,37 @@ namespace KidCut
                 AddOption("filter", id, CameraFrames.Filters[i][1], null, r, () => { _style.Filter = id; ApplyStyle(true); });
             }
 
+            // Under the preview: mirror toggle
+            _btnMirror = AddAction("↔ ESPEJO", new Rectangle((ClientSize.Width - 130) / 2, _preview.Bottom + 28, 130, 28), () => { _style.Mirror = !_style.Mirror; ApplyStyle(true); });
+            _tips.SetToolTip(_btnMirror, "Voltea la cámara horizontalmente (como un espejo)");
+
             // Bottom: colors and gradients
-            AddTitle("COLOR / DEGRADADO", 0, 430, ClientSize.Width);
+            AddTitle("COLOR / DEGRADADO", 0, 466, ClientSize.Width);
             int n = CameraFrames.Palettes.Length;
             int sx = (ClientSize.Width - (n * 42 + 2 * 112)) / 2;
             for (int i = 0; i < n; i++)
             {
                 string[] colors = CameraFrames.Palettes[i];
-                Button b = AddOption("color", string.Join(",", colors), "", CameraFrames.RenderSwatch(colors, 30), new Rectangle(sx + i * 42, 456, 38, 38), () => { _style.Colors = colors; ApplyStyle(false); });
+                Button b = AddOption("color", string.Join(",", colors), "", CameraFrames.RenderSwatch(colors, 30), new Rectangle(sx + i * 42, 490, 38, 38), () => { _style.Colors = colors; ApplyStyle(_style.Background == "frame"); });
                 _tips.SetToolTip(b, colors.Length == 1 ? "Color " + colors[0] : "Degradado " + string.Join(" → ", colors));
             }
             int cx = sx + n * 42 + 8;
-            Button custom = AddAction("Color propio...", new Rectangle(cx, 456, 104, 38), () => PickColors(1));
-            Button gradient = AddAction("Degradado propio...", new Rectangle(cx + 110, 456, 120, 38), () => PickColors(2));
+            Button custom = AddAction("Color propio...", new Rectangle(cx, 490, 104, 38), () => PickColors(1));
+            Button gradient = AddAction("Degradado propio...", new Rectangle(cx + 110, 490, 120, 38), () => PickColors(2));
+
+            // Bottom: virtual backgrounds (two rows of thumbnails) + empty-room capture
+            AddTitle("FONDO VIRTUAL", 0, 540, ClientSize.Width);
+            int perRow = 13, tx = (ClientSize.Width - (perRow * 44 + 176)) / 2;
+            for (int i = 0; i < CameraFrames.Backgrounds.Length; i++)
+            {
+                string id = CameraFrames.Backgrounds[i][0];
+                Image thumb = id == "none" ? null : CameraFrames.RenderBackground(id, _style.Colors, new Size(32, 32));
+                Button b = AddOption("background", id, id == "none" ? "✕" : "", thumb, new Rectangle(tx + (i % perRow) * 44, 564 + (i / perRow) * 44, 40, 40), () => { _style.Background = id; ApplyStyle(true); });
+                _tips.SetToolTip(b, CameraFrames.Backgrounds[i][1]);
+            }
+            _btnPlate = AddAction("📸 Capturar fondo vacío", new Rectangle(tx + perRow * 44 + 6, 564, 170, 84), CaptureEmptyBackground);
+            _btnPlate.Font = new Font("Segoe UI Emoji", 9);
+            _tips.SetToolTip(_btnPlate, "Sal del encuadre: en 3 segundos se toma una foto de la habitación vacía. Todo lo que no sea igual a ella (tú) se conserva y el resto se reemplaza por el fondo elegido.");
             _tips.SetToolTip(custom, "Elegir cualquier color sólido");
             _tips.SetToolTip(gradient, "Elegir dos colores para un degradado");
 
@@ -3016,7 +3399,7 @@ namespace KidCut
                 }
             }
             _style.Colors = picked.ToArray();
-            ApplyStyle(false);
+            ApplyStyle(_style.Background == "frame");
         }
 
         // Shape and filter change what FFmpeg delivers, so the camera feed restarts; border/colors only redraw the overlay
@@ -3026,6 +3409,9 @@ namespace KidCut
             Highlight("border", _style.Border);
             Highlight("filter", _style.Filter);
             Highlight("color", string.Join(",", _style.Colors));
+            Highlight("background", _style.Background);
+            _btnMirror.BackColor = _style.Mirror ? Color.FromArgb(22, 70, 45) : Color.FromArgb(30, 26, 55);
+            _btnMirror.Text = _style.Mirror ? "↔ ESPEJO: SÍ" : "↔ ESPEJO: NO";
             lock (_frameLock)
             {
                 if (_border != null) _border.Dispose();
@@ -3038,7 +3424,15 @@ namespace KidCut
             else if (_camProcess == null || _camProcess.HasExited) ShowFrame(null);
         }
 
+        // Same camera mode order as the recorder (720p first) so the empty-room capture lines up with the live feed
+        private const string HdMode = "-video_size 1280x720 -framerate 30 ";
+
         private void StartPreview()
+        {
+            StartPreview(true);
+        }
+
+        private void StartPreview(bool hd)
         {
             StopPreview();
             ShowFrame(null);
@@ -3054,8 +3448,18 @@ namespace KidCut
                 return;
             }
             Size size = _canvas;
-            string args = string.Format("-hide_banner -loglevel error -f dshow -i \"video={0}\" -vf \"{1},fps=15\" -f rawvideo -pix_fmt bgr24 -",
-                camera, CameraFrames.FfmpegFilter(_style, size));
+            string inputs = "";
+            if (CameraFrames.UsesPlate(_style)) inputs += string.Format("-i \"{0}\" ", CameraFrames.PlatePath);
+            if (CameraFrames.UsesBackgroundImage(_style))
+            {
+                string bg = Path.Combine(Program.ScratchDir, "preview_background.png");
+                using (Bitmap b = CameraFrames.RenderBackground(_style.Background, _style.Colors, size)) b.Save(bg, ImageFormat.Png);
+                inputs += string.Format("-i \"{0}\" ", bg);
+            }
+            string graph = CameraFrames.Graph(_style, size, "[0:v]", "[1:v]", "[2:v]", "out");
+            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" {2}-filter_complex \"{3}\" -map \"[out]\" -f rawvideo -pix_fmt bgr24 -",
+                hd ? HdMode : "", camera, inputs, graph);
+            _hd = hd;
             Process p = new Process
             {
                 StartInfo = new ProcessStartInfo(FfmpegEngine.FfmpegPath, args)
@@ -3111,11 +3515,77 @@ namespace KidCut
                 if (!any)
                 {
                     any = true;
-                    SetStatus("Vista previa en vivo");
+                    SetStatus(_style.Background != "none" && !File.Exists(CameraFrames.PlatePath)
+                        ? "Para usar el fondo: pulsa \"Capturar fondo vacío\" y sal del encuadre."
+                        : "Vista previa en vivo");
                 }
                 ShowFrame(frame);
             }
-            if (!any && !_closing && _camProcess == p) SetStatus("No se pudo abrir la cámara (¿la usa otra app?). Vista de ejemplo.");
+            if (!any && !_closing && _camProcess == p)
+            {
+                if (_hd)
+                {
+                    // Camera without 720p: retry with its default mode
+                    try { BeginInvoke((MethodInvoker)delegate { if (_camProcess == p) StartPreview(false); }); } catch { }
+                    return;
+                }
+                SetStatus("No se pudo abrir la cámara (¿la usa otra app?). Vista de ejemplo.");
+                return;
+            }
+            if (any && !_closing && _camProcess == p) SetStatus("La cámara se detuvo.");
+        }
+
+        private volatile bool _hd = true;
+
+        // Countdown so the user can step out of frame, then one still of the empty room at the recorder's camera mode
+        private void CaptureEmptyBackground()
+        {
+            string camera = ScreenRecorder.FindCamera();
+            if (camera == null || ScreenRecorder.IsRecording || _countdownTimer != null) return;
+            _countdown = 3;
+            _btnPlate.Enabled = false;
+            _countdownTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _status.Text = "¡Sal del encuadre! Captura en 3...";
+            _countdownTimer.Tick += (s, e) =>
+            {
+                _countdown--;
+                if (_countdown > 0)
+                {
+                    _status.Text = "¡Sal del encuadre! Captura en " + _countdown + "...";
+                    return;
+                }
+                _countdownTimer.Dispose();
+                _countdownTimer = null;
+                _status.Text = "Capturando la habitación vacía...";
+                StopPreview();
+                bool hd = _hd;
+                new Thread(() =>
+                {
+                    string err = null;
+                    string tmp = CameraFrames.PlatePath + ".tmp.png";
+                    // Skip the first frames so auto-exposure settles
+                    string args = string.Format("-f dshow {0}-i \"video={1}\" -vf \"select=gte(n\\,20)\" -frames:v 1 -update 1 \"{2}\"", hd ? HdMode : "", camera, tmp);
+                    if (MediaTools.Ffmpeg(args, 20000, out err) == 0 && File.Exists(tmp))
+                    {
+                        File.Copy(tmp, CameraFrames.PlatePath, true);
+                        File.Delete(tmp);
+                        err = null;
+                    }
+                    else if (string.IsNullOrEmpty(err)) err = "sin imagen";
+                    try
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            _btnPlate.Enabled = true;
+                            if (_style.Background == "none") _style.Background = "blur";
+                            ApplyStyle(true);
+                            _status.Text = err == null ? "✔ Fondo vacío capturado. Vuelve al encuadre." : "No se pudo capturar: " + err;
+                        });
+                    }
+                    catch { }
+                }) { IsBackground = true }.Start();
+            };
+            _countdownTimer.Start();
         }
 
         private void SetStatus(string text)
