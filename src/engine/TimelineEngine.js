@@ -399,6 +399,7 @@ export class TimelineEngine {
       isMuted: clipData.isMuted || false,
       audioEffect: clipData.audioEffect || 'none',
       effectIntensity: clipData.effectIntensity !== undefined ? clipData.effectIntensity : 50,
+      eq: clipData.eq || null,
       fadeIn: clipData.fadeIn || 0,
       fadeOut: clipData.fadeOut || 0,
       opacity: clipData.opacity !== undefined ? clipData.opacity : 1.0,
@@ -467,6 +468,7 @@ export class TimelineEngine {
       audioBuffer: sourceClip.audioBuffer,
       audioEffect: sourceClip.audioEffect || 'none',
       effectIntensity: sourceClip.effectIntensity !== undefined ? sourceClip.effectIntensity : 50,
+      eq: sourceClip.eq || null,
       fadeIn: 0,
       fadeOut: 0,
       sourceVideoClipId: sourceClip.id

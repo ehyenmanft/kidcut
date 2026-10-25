@@ -13,11 +13,13 @@ import { setupTimelineView } from './ui/TimelineView.js';
 import { setupInspectorView } from './ui/InspectorView.js';
 import { setupExportModal } from './ui/ExportModal.js';
 import { setupVoiceRecorder } from './ui/VoiceRecorder.js';
+import { setupConvertModal } from './ui/ConvertModal.js';
 
 window.addEventListener('DOMContentLoaded', async () => {
   // 1. Setup Preview & Controllers
   const preview = setupPreviewCanvas(timelineEngine);
   const exportModal = setupExportModal(timelineEngine);
+  setupConvertModal();
   setupHeaderBar(timelineEngine, () => exportModal.open());
   setupAssetLibrary(timelineEngine);
   setupTimelineView(timelineEngine);

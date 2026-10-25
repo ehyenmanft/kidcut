@@ -10,9 +10,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen:wght@400;700&family=VT323&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-  
-  <script type="module" crossorigin src="/assets/index-Nc9KyF9y.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-1AHAetNx.css">
+  
+  <script type="module" crossorigin src="/assets/index-D2r1Jvyj.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-Crz7TjZe.css">
 </head>
 <body class="pixel-theme crt-active">
   <!-- CRT Monitor Scanline Overlay -->
@@ -100,6 +100,9 @@
         </button>
         <button id="btn-sfx-toggle" class="pixel-btn btn-sm btn-sound" title="Sonidos Chiptune de Interfaz">
           🔊 SFX: ON
+        </button>
+        <button id="btn-convert-modal" class="pixel-btn btn-sm" title="Convertir cualquier video, audio o imagen a otro formato">
+          🔄 CONVERTIR
         </button>
         <button id="btn-export-modal" class="pixel-btn arcade-gold btn-export">
           💾 EXPORTAR VIDEO
@@ -301,6 +304,8 @@
           <div class="pixel-radio-group" id="export-format-group">
             <button class="pixel-opt-btn active" data-format="mp4">🎬 MP4 (H.264 + AAC Universal Windows/Móvil)</button>
             <button class="pixel-opt-btn" data-format="webm">🌐 WebM (VP9 + Opus Alta Definición)</button>
+            <button class="pixel-opt-btn" data-format="mov">🍎 MOV (H.264 + AAC)</button>
+            <button class="pixel-opt-btn" data-format="mkv">📦 MKV (H.264 + AAC)</button>
             <button class="pixel-opt-btn" data-format="gif">👾 GIF Animado (8-Bit LZW)</button>
             <button class="pixel-opt-btn" data-format="wav">🎵 Audio WAV (16-Bit PCM)</button>
           </div>
@@ -330,6 +335,71 @@
         <button id="btn-open-export-folder" class="pixel-btn btn-secondary hidden" style="background: #1a4488; color: #fff;">📁 ABRIR EN EXPLORADOR</button>
         <button id="btn-start-export" class="pixel-btn arcade-gold">INICIAR RENDERIZADO</button>
         <a id="download-anchor" class="hidden" download="kidcut_export.webm"></a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Convert Modal -->
+  <div id="convert-modal" class="modal-overlay hidden">
+    <div class="modal-box pixel-box">
+      <div class="modal-header">
+        <span class="modal-title">🔄 CONVERTIR FORMATO (VIDEO · AUDIO · IMAGEN)</span>
+        <button id="btn-close-convert" class="modal-close-btn">✖</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="export-setting-row">
+          <label>ARCHIVO DE ORIGEN:</label>
+          <div style="display: flex; gap: 6px; align-items: center;">
+            <button id="btn-convert-pick" class="pixel-btn btn-secondary" style="font-size: 8px;">📁 ELEGIR ARCHIVO</button>
+            <span id="convert-source" style="font-size: 8px; color: var(--color-cyan); word-break: break-all;">NINGUNO</span>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>VIDEO:</label>
+          <div class="pixel-radio-group convert-format-group">
+            <button class="pixel-opt-btn active" data-format="mp4">MP4 (H.264)</button>
+            <button class="pixel-opt-btn" data-format="mp4-h265">MP4 (H.265, más ligero)</button>
+            <button class="pixel-opt-btn" data-format="webm">WebM (VP9)</button>
+            <button class="pixel-opt-btn" data-format="mov">MOV</button>
+            <button class="pixel-opt-btn" data-format="mkv">MKV (sin recodificar)</button>
+            <button class="pixel-opt-btn" data-format="avi">AVI</button>
+            <button class="pixel-opt-btn" data-format="gif">GIF animado</button>
+            <button class="pixel-opt-btn" data-format="webp-anim">WebP animado</button>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>AUDIO:</label>
+          <div class="pixel-radio-group convert-format-group">
+            <button class="pixel-opt-btn" data-format="mp3">MP3</button>
+            <button class="pixel-opt-btn" data-format="wav">WAV</button>
+            <button class="pixel-opt-btn" data-format="m4a">M4A (AAC)</button>
+            <button class="pixel-opt-btn" data-format="flac">FLAC (sin pérdida)</button>
+            <button class="pixel-opt-btn" data-format="ogg">OGG</button>
+          </div>
+        </div>
+
+        <div class="export-setting-row">
+          <label>IMAGEN (de un video usa el primer cuadro):</label>
+          <div class="pixel-radio-group convert-format-group">
+            <button class="pixel-opt-btn" data-format="png">PNG</button>
+            <button class="pixel-opt-btn" data-format="jpg">JPG</button>
+            <button class="pixel-opt-btn" data-format="webp">WebP</button>
+            <button class="pixel-opt-btn" data-format="avif">AVIF</button>
+            <button class="pixel-opt-btn" data-format="bmp">BMP</button>
+            <button class="pixel-opt-btn" data-format="tiff">TIFF</button>
+          </div>
+        </div>
+
+        <div id="convert-status" class="export-msg-status hidden"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-cancel-convert" class="pixel-btn btn-secondary">CERRAR</button>
+        <button id="btn-reveal-convert" class="pixel-btn btn-secondary hidden" style="background: #1a4488; color: #fff;">📁 ABRIR EN EXPLORADOR</button>
+        <button id="btn-start-convert" class="pixel-btn arcade-gold" disabled>CONVERTIR</button>
       </div>
     </div>
   </div>
@@ -393,6 +463,6 @@
       </div>
     </div>
   </div>
-
+
 </body>
 </html>

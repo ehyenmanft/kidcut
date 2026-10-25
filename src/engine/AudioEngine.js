@@ -29,6 +29,25 @@ export function getPitchMultiplier(effectId) {
   }
 }
 
+// 5-band equalizer: gains in dB per band, stored on each clip as `clip.eq`
+export const EQ_BANDS = [
+  { label: '60', freq: 60, type: 'lowshelf' },
+  { label: '250', freq: 250, type: 'peaking' },
+  { label: '1K', freq: 1000, type: 'peaking' },
+  { label: '4K', freq: 4000, type: 'peaking' },
+  { label: '12K', freq: 12000, type: 'highshelf' }
+];
+
+export const EQ_PRESETS = {
+  flat: { label: 'Plano', gains: [0, 0, 0, 0, 0] },
+  voice: { label: 'Voz clara', gains: [-6, -2, 2, 4, 2] },
+  podcast: { label: 'Podcast / locución', gains: [-3, 2, 0, 3, 1] },
+  bass: { label: 'Más graves', gains: [6, 3, 0, 0, 0] },
+  bright: { label: 'Brillo', gains: [0, 0, 0, 3, 6] },
+  music: { label: 'Música (V)', gains: [4, 1, -2, 1, 4] },
+  phone: { label: 'Teléfono', gains: [-12, -6, 6, 0, -12] }
+};
+
 export class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -990,7 +1009,7 @@ export class AudioEngine {
 
         // Apply 100 audio effect chain in offline context
         const effectOutput = this.createEffectChain(offlineCtx, source, clip.audioEffect, clip.effectIntensity || 50);
-        effectOutput.connect(gainNode);
+        this.buildEqChain(offlineCtx, effectOutput, clip.eq).output.connect(gainNode);
         gainNode.connect(offlineCtx.destination);
 
         const trimIn = clip.trimIn || 0;
@@ -1005,6 +1024,34 @@ export class AudioEngine {
 
     const renderedBuffer = await offlineCtx.startRendering();
     return renderedBuffer;
+  }
+
+  // Chains one biquad per EQ band after `input`; returns the last node plus the filters for live updates
+  buildEqChain(ctx, input, eq) {
+    if (!eq) return { output: input, filters: [] };
+    let node = input;
+    const filters = EQ_BANDS.map((band, i) => {
+      const f = ctx.createBiquadFilter();
+      f.type = band.type;
+      f.frequency.value = band.freq;
+      f.Q.value = 1.0;
+      f.gain.value = eq[i] || 0;
+      node.connect(f);
+      node = f;
+      return f;
+    });
+    return { output: node, filters };
+  }
+
+  // Live preview: apply slider moves to the playing clip without restarting it
+  updateClipEq(clip, currentTime) {
+    const item = this.activeSources.get(clip.id);
+    if (!item) return;
+    if (!item.eqFilters.length) {
+      this.playClipAudio(clip, currentTime); // clip had no EQ when it started: rebuild its chain
+      return;
+    }
+    item.eqFilters.forEach((f, i) => { f.gain.value = (clip.eq && clip.eq[i]) || 0; });
   }
 
   // Timeline audio playback management (Real-time preview)
@@ -1044,14 +1091,15 @@ export class AudioEngine {
 
     // Apply audio effects chain
     const effectOutput = this.createEffectChain(this.ctx, source, clip.audioEffect, clip.effectIntensity || 50);
-    effectOutput.connect(gain);
+    const eqChain = this.buildEqChain(this.ctx, effectOutput, clip.eq);
+    eqChain.output.connect(gain);
     gain.connect(this.masterGain);
 
     const durationRemaining = (clip.duration - (currentTime - clipStart));
     const sourceDurationRemaining = durationRemaining * effectiveSpeed;
     source.start(0, offsetInClip, sourceDurationRemaining);
 
-    this.activeSources.set(clip.id, { sourceNode: source, gainNode: gain });
+    this.activeSources.set(clip.id, { sourceNode: source, gainNode: gain, eqFilters: eqChain.filters });
   }
 
   stopClipAudio(clipId) {
