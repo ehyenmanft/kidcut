@@ -2295,13 +2295,18 @@ namespace KidCut
                     extraInputs += string.Format("-i \"{0}\" ", bg);
                 }
                 string camGraph = CameraFrames.Graph(style, cam, "[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000),", "[4:v]", "[5:v]", "c0");
+                // Same spot where the user last left the on-screen bubble (bottom-right by default)
+                Size phys = PhysicalScreenSize();
+                PointF frac = CameraBubble.PositionFraction(style);
+                int camX = Math.Max(0, Math.Min(phys.Width - cam.Width, (int)(frac.X * phys.Width)));
+                int camY = Math.Max(0, Math.Min(phys.Height - cam.Height, (int)(frac.Y * phys.Height)));
                 video = string.Format(
                     "{0} -f dshow -rtbufsize 256M {1}-i \"video={2}\" -i \"{3}\" -i \"{4}\" {5}-filter_complex \"" +
                     "[0:v]{6}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];{7};" +
                     "[c0]format=yuva420p[c];[2:v]format=gray[m];[c][m]alphamerge[cm];" +
                     // CFR on the output side: an fps filter would pad up to the camera's EOF stamp (its own device clock) on stop
-                    "[cm][3:v]overlay=0:0[pip];[scr][pip]overlay=W-w-24:H-h-24:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {8}",
-                    screenInput, cameraMode, camera, mask, border, extraInputs, screenFilter, camGraph, fps);
+                    "[cm][3:v]overlay=0:0[pip];[scr][pip]overlay={9}:{10}:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {8}",
+                    screenInput, cameraMode, camera, mask, border, extraInputs, screenFilter, camGraph, fps, camX, camY);
             }
             string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} \"{3}\"", video, EncoderArgs(), fps * 2, _videoTemp);
             try
@@ -2462,6 +2467,8 @@ namespace KidCut
         public string[] Colors { get; set; } // one color = solid, more = gradient stops
         public string Background { get; set; }
         public bool Mirror { get; set; }
+        public double? PosX { get; set; } // camera top-left as a fraction of the primary screen; null = bottom-right
+        public double? PosY { get; set; }
 
         public static readonly CameraStyle Current = Load();
 
@@ -2484,6 +2491,7 @@ namespace KidCut
             if (!CameraFrames.Has(CameraFrames.Borders, s.Border)) s.Border = "solid";
             if (!CameraFrames.Has(CameraFrames.Filters, s.Filter)) s.Filter = "none";
             if (!CameraFrames.Has(CameraFrames.Backgrounds, s.Background)) s.Background = "none";
+            if (!(s.PosX >= 0 && s.PosX <= 1 && s.PosY >= 0 && s.PosY <= 1)) s.PosX = s.PosY = null;
             if (s.Colors == null || s.Colors.Length == 0 || s.Colors.Length > 8 || !s.Colors.All(CameraFrames.IsHexColor))
             {
                 s.Colors = new[] { "#FF2244", "#FFD200" };
@@ -3149,6 +3157,94 @@ namespace KidCut
             return bmp;
         }
 
+        // Same camera mode order as the recorder (720p first) so the empty-room capture lines up with the live feed
+        public const string HdMode = "-video_size 1280x720 -framerate 30 ";
+
+        // Live camera through the shared graph, as raw BGR frames on stdout (designer preview and on-screen bubble)
+        public static Process StartCamera(CameraStyle s, Size size, string camera, bool hd, string tag)
+        {
+            string inputs = "";
+            if (UsesPlate(s)) inputs += string.Format("-i \"{0}\" ", PlatePath);
+            if (UsesBackgroundImage(s))
+            {
+                string bg = Path.Combine(Program.ScratchDir, tag + "_background.png");
+                using (Bitmap b = RenderBackground(s.Background, s.Colors, size)) b.Save(bg, ImageFormat.Png);
+                inputs += string.Format("-i \"{0}\" ", bg);
+            }
+            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" {2}-filter_complex \"{3}\" -map \"[out]\" -f rawvideo -pix_fmt bgr24 -",
+                hd ? HdMode : "", camera, inputs, Graph(s, size, "[0:v]", "[1:v]", "[2:v]", "out"));
+            Process p = new Process
+            {
+                StartInfo = new ProcessStartInfo(FfmpegEngine.FfmpegPath, args)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+            p.ErrorDataReceived += (o, e) => { };
+            p.Start();
+            p.BeginErrorReadLine();
+            return p;
+        }
+
+        // Blocks reading frames until the stream ends or keepGoing() is false; onFrame owns each bitmap
+        public static void ReadCameraFrames(Process p, Size size, Func<bool> keepGoing, Action<Bitmap> onFrame)
+        {
+            int stride = size.Width * 3, frameBytes = stride * size.Height;
+            byte[] buf = new byte[frameBytes];
+            Stream stdout = p.StandardOutput.BaseStream;
+            while (keepGoing())
+            {
+                int read = 0;
+                while (read < frameBytes)
+                {
+                    int n = stdout.Read(buf, read, frameBytes - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read < frameBytes) return;
+
+                Bitmap frame = new Bitmap(size.Width, size.Height, PixelFormat.Format24bppRgb);
+                BitmapData data = frame.LockBits(new Rectangle(Point.Empty, size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+                for (int y = 0; y < size.Height; y++) Marshal.Copy(buf, y * stride, data.Scan0 + y * data.Stride, stride);
+                frame.UnlockBits(data);
+                onFrame(frame);
+            }
+        }
+
+        // Camera (or a silhouette placeholder when null) inside the shape, plus the border on top
+        public static Bitmap Compose(Bitmap camera, Size canvas, GraphicsPath clip, Bitmap border)
+        {
+            Bitmap result = new Bitmap(canvas.Width, canvas.Height, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(result))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                if (camera != null)
+                {
+                    using (TextureBrush tb = new TextureBrush(camera)) g.FillPath(tb, clip);
+                }
+                else
+                {
+                    g.SetClip(clip);
+                    using (LinearGradientBrush lg = new LinearGradientBrush(new Rectangle(Point.Empty, canvas), Color.FromArgb(70, 80, 110), Color.FromArgb(35, 30, 60), 90f))
+                    {
+                        g.FillPath(lg, clip);
+                    }
+                    RectangleF r = ShapeRect(canvas);
+                    using (SolidBrush person = new SolidBrush(Color.FromArgb(150, 160, 190)))
+                    {
+                        g.FillEllipse(person, r.X + r.Width * 0.36f, r.Y + r.Height * 0.2f, r.Width * 0.28f, r.Height * 0.32f);
+                        g.FillEllipse(person, r.X + r.Width * 0.2f, r.Y + r.Height * 0.58f, r.Width * 0.6f, r.Height * 0.6f);
+                    }
+                    g.ResetClip();
+                }
+                g.DrawImage(border, 0, 0);
+            }
+            return result;
+        }
+
         // Designer helpers: shape icon and color swatch
         public static Bitmap RenderShapeIcon(string shape, int size, Color color)
         {
@@ -3206,7 +3302,12 @@ namespace KidCut
 
         public static void ShowDesigner()
         {
-            if (_instance == null || _instance.IsDisposed) _instance = new CameraStyleForm();
+            if (_instance == null || _instance.IsDisposed)
+            {
+                // The preview needs the camera; during a recording the bubble keeps it and the designer shows a sample
+                if (!ScreenRecorder.IsRecording) CameraBubble.Suspend();
+                _instance = new CameraStyleForm();
+            }
             _instance.Show();
             _instance.Activate();
         }
@@ -3325,6 +3426,7 @@ namespace KidCut
                 _closing = true;
                 StopPreview();
                 _style.Save();
+                CameraBubble.Resume();
             };
 
             ApplyStyle(true);
@@ -3424,8 +3526,7 @@ namespace KidCut
             else if (_camProcess == null || _camProcess.HasExited) ShowFrame(null);
         }
 
-        // Same camera mode order as the recorder (720p first) so the empty-room capture lines up with the live feed
-        private const string HdMode = "-video_size 1280x720 -framerate 30 ";
+        private const string HdMode = CameraFrames.HdMode;
 
         private void StartPreview()
         {
@@ -3448,31 +3549,8 @@ namespace KidCut
                 return;
             }
             Size size = _canvas;
-            string inputs = "";
-            if (CameraFrames.UsesPlate(_style)) inputs += string.Format("-i \"{0}\" ", CameraFrames.PlatePath);
-            if (CameraFrames.UsesBackgroundImage(_style))
-            {
-                string bg = Path.Combine(Program.ScratchDir, "preview_background.png");
-                using (Bitmap b = CameraFrames.RenderBackground(_style.Background, _style.Colors, size)) b.Save(bg, ImageFormat.Png);
-                inputs += string.Format("-i \"{0}\" ", bg);
-            }
-            string graph = CameraFrames.Graph(_style, size, "[0:v]", "[1:v]", "[2:v]", "out");
-            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" {2}-filter_complex \"{3}\" -map \"[out]\" -f rawvideo -pix_fmt bgr24 -",
-                hd ? HdMode : "", camera, inputs, graph);
             _hd = hd;
-            Process p = new Process
-            {
-                StartInfo = new ProcessStartInfo(FfmpegEngine.FfmpegPath, args)
-                {
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                }
-            };
-            p.ErrorDataReceived += (s, e) => { };
-            p.Start();
-            p.BeginErrorReadLine();
+            Process p = CameraFrames.StartCamera(_style, size, camera, hd, "preview");
             _camProcess = p;
             _status.Text = "Abriendo cámara...";
             new Thread(() => ReadFrames(p, size)) { IsBackground = true }.Start();
@@ -3493,25 +3571,9 @@ namespace KidCut
 
         private void ReadFrames(Process p, Size size)
         {
-            int stride = size.Width * 3, frameBytes = stride * size.Height;
-            byte[] buf = new byte[frameBytes];
-            Stream stdout = p.StandardOutput.BaseStream;
             bool any = false;
-            while (!_closing && _camProcess == p)
+            CameraFrames.ReadCameraFrames(p, size, () => !_closing && _camProcess == p, frame =>
             {
-                int read = 0;
-                while (read < frameBytes)
-                {
-                    int n = stdout.Read(buf, read, frameBytes - read);
-                    if (n <= 0) break;
-                    read += n;
-                }
-                if (read < frameBytes) break;
-
-                Bitmap frame = new Bitmap(size.Width, size.Height, PixelFormat.Format24bppRgb);
-                BitmapData data = frame.LockBits(new Rectangle(Point.Empty, size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-                for (int y = 0; y < size.Height; y++) Marshal.Copy(buf, y * stride, data.Scan0 + y * data.Stride, stride);
-                frame.UnlockBits(data);
                 if (!any)
                 {
                     any = true;
@@ -3520,7 +3582,7 @@ namespace KidCut
                         : "Vista previa en vivo");
                 }
                 ShowFrame(frame);
-            }
+            });
             if (!any && !_closing && _camProcess == p)
             {
                 if (_hd)
@@ -3600,31 +3662,7 @@ namespace KidCut
             lock (_frameLock)
             {
                 if (_clip == null) return;
-                result = new Bitmap(_canvas.Width, _canvas.Height, PixelFormat.Format32bppArgb);
-                using (Graphics g = Graphics.FromImage(result))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    if (camera != null)
-                    {
-                        using (TextureBrush tb = new TextureBrush(camera)) g.FillPath(tb, _clip);
-                    }
-                    else
-                    {
-                        g.SetClip(_clip);
-                        using (LinearGradientBrush lg = new LinearGradientBrush(new Rectangle(Point.Empty, _canvas), Color.FromArgb(70, 80, 110), Color.FromArgb(35, 30, 60), 90f))
-                        {
-                            g.FillPath(lg, _clip);
-                        }
-                        RectangleF r = CameraFrames.ShapeRect(_canvas);
-                        using (SolidBrush person = new SolidBrush(Color.FromArgb(150, 160, 190)))
-                        {
-                            g.FillEllipse(person, r.X + r.Width * 0.36f, r.Y + r.Height * 0.2f, r.Width * 0.28f, r.Height * 0.32f);
-                            g.FillEllipse(person, r.X + r.Width * 0.2f, r.Y + r.Height * 0.58f, r.Width * 0.6f, r.Height * 0.6f);
-                        }
-                        g.ResetClip();
-                    }
-                    g.DrawImage(_border, 0, 0);
-                }
+                result = CameraFrames.Compose(camera, _canvas, _clip, _border);
             }
             if (camera != null) camera.Dispose();
 
@@ -3638,6 +3676,214 @@ namespace KidCut
             else
             {
                 try { BeginInvoke(apply); } catch { result.Dispose(); }
+            }
+        }
+    }
+
+    // Live framed camera floating on the desktop. While it is shown the recorder does not open the camera:
+    // the screen capture records the bubble wherever the user drags it.
+    public class CameraBubble : Form
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X, Y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE { public int Cx, Cy; }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+
+        [DllImport("user32.dll")]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, IntPtr pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private static CameraBubble _instance;
+        private static bool _suspended;
+        public static bool IsActive { get; private set; }
+
+        private readonly CameraStyle _style = CameraStyle.Current;
+        private readonly Size _canvas;
+        private readonly Bitmap _border;
+        private readonly GraphicsPath _clip;
+        private Process _cam;
+        private volatile bool _stopped;
+
+        public static void ShowBubble()
+        {
+            IsActive = true;
+            _suspended = false;
+            if (_instance == null || _instance.IsDisposed) _instance = new CameraBubble();
+            _instance.Show();
+        }
+
+        public static void HideBubble()
+        {
+            IsActive = false;
+            if (_instance != null && !_instance.IsDisposed) _instance.Close();
+            _instance = null;
+        }
+
+        // The designer needs the camera: release it, then come back (with any new style) when it closes
+        public static void Suspend()
+        {
+            if (!IsActive || _instance == null || _instance.IsDisposed) return;
+            _suspended = true;
+            _instance.Close();
+            _instance = null;
+        }
+
+        public static void Resume()
+        {
+            if (IsActive && _suspended) ShowBubble();
+        }
+
+        // Size on screen (logical pixels) and top-left as a fraction of the primary screen
+        public static Size LogicalSize(CameraStyle s)
+        {
+            return CameraFrames.CanvasSize(s, Screen.PrimaryScreen.Bounds.Width / (s.Shape == "rect" ? 4 : 5));
+        }
+
+        public static PointF PositionFraction(CameraStyle s)
+        {
+            Rectangle scr = Screen.PrimaryScreen.Bounds;
+            if (s.PosX.HasValue && s.PosY.HasValue) return new PointF((float)s.PosX.Value, (float)s.PosY.Value);
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            Size sz = LogicalSize(s);
+            return new PointF((float)(wa.Right - sz.Width - 24) / scr.Width, (float)(wa.Bottom - sz.Height - 24) / scr.Height);
+        }
+
+        private CameraBubble()
+        {
+            Text = "KidCut Cámara";
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            Rectangle scr = Screen.PrimaryScreen.Bounds;
+            _canvas = LogicalSize(_style);
+            Size = _canvas;
+            PointF frac = PositionFraction(_style);
+            Location = new Point(scr.X + (int)(frac.X * scr.Width), scr.Y + (int)(frac.Y * scr.Height));
+            _border = CameraFrames.RenderBorder(_style, _canvas);
+            _clip = CameraFrames.ShapePath(_style.Shape, CameraFrames.ShapeRect(_canvas));
+
+            MouseDown += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                ReleaseCapture();
+                SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); // drag like a title bar
+            };
+            Move += (s, e) =>
+            {
+                _style.PosX = Math.Max(0, Math.Min(1, (double)(Left - scr.X) / scr.Width));
+                _style.PosY = Math.Max(0, Math.Min(1, (double)(Top - scr.Y) / scr.Height));
+            };
+            FormClosing += (s, e) =>
+            {
+                StopCamera();
+                _style.Save();
+            };
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80000 | 0x80; // WS_EX_LAYERED (per-pixel alpha) | WS_EX_TOOLWINDOW (no Alt+Tab)
+                return cp;
+            }
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            using (Bitmap placeholder = CameraFrames.Compose(null, _canvas, _clip, _border)) SetBitmap(placeholder);
+            StartCamera(true);
+        }
+
+        private void StartCamera(bool hd)
+        {
+            string camera = ScreenRecorder.FindCamera();
+            if (camera == null || _stopped) return;
+            Process p = CameraFrames.StartCamera(_style, _canvas, camera, hd, "bubble");
+            _cam = p;
+            new Thread(() =>
+            {
+                bool any = false;
+                CameraFrames.ReadCameraFrames(p, _canvas, () => !_stopped && _cam == p, frame =>
+                {
+                    any = true;
+                    Bitmap composed = CameraFrames.Compose(frame, _canvas, _clip, _border);
+                    frame.Dispose();
+                    try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) SetBitmap(composed); composed.Dispose(); }); }
+                    catch { composed.Dispose(); }
+                });
+                // Camera without 720p: retry with its default mode
+                if (!any && hd && !_stopped && _cam == p)
+                {
+                    try { BeginInvoke((MethodInvoker)delegate { StartCamera(false); }); } catch { }
+                }
+            }) { IsBackground = true }.Start();
+        }
+
+        private void StopCamera()
+        {
+            _stopped = true;
+            Process p = _cam;
+            _cam = null;
+            if (p == null) return;
+            try
+            {
+                if (!p.HasExited) p.Kill();
+                p.WaitForExit(2000);
+            }
+            catch { }
+        }
+
+        // Per-pixel alpha: soft edges, glows and brush splatter blend with whatever is behind the bubble
+        private void SetBitmap(Bitmap bmp)
+        {
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr hBitmap = bmp.GetHbitmap(Color.FromArgb(0));
+            IntPtr old = SelectObject(memDc, hBitmap);
+            try
+            {
+                SIZE size = new SIZE { Cx = bmp.Width, Cy = bmp.Height };
+                POINT src = new POINT();
+                BLENDFUNCTION blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+                UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memDc, ref src, 0, ref blend, 2); // ULW_ALPHA
+            }
+            finally
+            {
+                SelectObject(memDc, old);
+                DeleteObject(hBitmap);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
             }
         }
     }
@@ -3667,6 +3913,8 @@ namespace KidCut
         private readonly Button _btnFps;
         private readonly Button _btnList;
         private readonly Button _btnStyle;
+        private readonly Button _btnShow;
+        private bool _showOn = true;
         private readonly Label _lblTime;
         private readonly ToolTip _tips = new ToolTip();
         private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
@@ -3688,7 +3936,7 @@ namespace KidCut
             TopMost = true;
             ShowInTaskbar = false;
             BackColor = Color.FromArgb(14, 10, 28);
-            Size = new Size(578, 44);
+            Size = new Size(616, 44);
             Opacity = 0.95;
             StartPosition = FormStartPosition.Manual;
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -3731,12 +3979,13 @@ namespace KidCut
             AddButton("📷", "Captura de pantalla (PNG sin pérdida)", 208, 40, TakeShot);
             _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 250, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
             _btnMic = AddButton("🎙", "Grabar el micrófono", 292, 40, () => { _micOn = !_micOn; RefreshToggles(); });
-            _btnCam = AddButton("📹", "Buscando cámara...", 334, 40, () => { _camOn = !_camOn; RefreshToggles(); });
-            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro y colores", 376, 36, CameraStyleForm.ShowDesigner);
-            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 414, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
-            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 452, 40, ShowRecordingsMenu);
-            AddButton("✂", "Abrir el editor KidCut", 494, 40, () => Program.OpenInBrowser(Program.TargetUrl));
-            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 536, 40, Hide);
+            _btnCam = AddButton("📹", "Buscando cámara...", 334, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
+            _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 376, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
+            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 414, 36, CameraStyleForm.ShowDesigner);
+            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 452, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
+            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 490, 40, ShowRecordingsMenu);
+            AddButton("✂", "Abrir el editor KidCut", 532, 40, () => Program.OpenInBrowser(Program.TargetUrl));
+            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 574, 40, Hide);
             RefreshToggles();
 
             // Probing DirectShow takes ~1 s, so the camera button enables itself once a webcam is found
@@ -3794,7 +4043,17 @@ namespace KidCut
             _btnMic.BackColor = _micOn ? OnColor : OffColor;
             _btnSys.Text = _sysOn ? "🔊" : "🔇";
             _btnCam.BackColor = _camOn ? OnColor : OffColor;
+            _btnShow.BackColor = _showOn ? OnColor : OffColor;
+            _btnShow.Text = _showOn ? "👁" : "🙈";
             _btnFps.Text = _fps.ToString();
+        }
+
+        // Camera on + "show" on = live bubble on the desktop; otherwise no bubble
+        private void SyncBubble()
+        {
+            bool want = _camOn && _showOn && ScreenRecorder.FindCamera() != null;
+            if (want && !CameraBubble.IsActive) CameraBubble.ShowBubble();
+            else if (!want && CameraBubble.IsActive) CameraBubble.HideBubble();
         }
 
         private void ShowRecordingsMenu()
@@ -3843,8 +4102,10 @@ namespace KidCut
                 new Thread(ScreenRecorder.Stop) { IsBackground = true }.Start();
                 return;
             }
-            bool cam = _camOn && _btnCam.Enabled;
-            if (cam) CameraStyleForm.CloseIfOpen(); // frees the webcam held by the designer preview
+            bool camOn = _camOn && _btnCam.Enabled;
+            if (camOn) CameraStyleForm.CloseIfOpen(); // frees the webcam held by the designer preview
+            // With the bubble on screen the screen capture already records it; FFmpeg only composes the camera when hidden
+            bool cam = camOn && !CameraBubble.IsActive;
             _starting = true;
             bool sys = _sysOn, mic = _micOn;
             int fps = _fps;
@@ -3891,6 +4152,7 @@ namespace KidCut
             _btnSys.Enabled = _btnMic.Enabled = _btnFps.Enabled = !rec && !busy;
             bool hasCamera = _camSearched && ScreenRecorder.FindCamera() != null;
             _btnCam.Enabled = hasCamera && !rec && !busy;
+            _btnShow.Enabled = hasCamera && _camOn && !rec && !busy;
             string camTip = !_camSearched ? "Buscando cámara..."
                 : hasCamera ? "Grabar también la cámara (" + ScreenRecorder.FindCamera() + ") en una esquina"
                 : "No se encontró ninguna cámara";
