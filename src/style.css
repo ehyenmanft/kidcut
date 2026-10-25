@@ -1797,3 +1797,69 @@ button:disabled,
 }
 
 
+
+/* 5-band equalizer (Inspector) */
+.eq-bands {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 6px 2px 0;
+}
+
+.eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+
+.eq-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  height: 90px;
+  width: 18px;
+  accent-color: var(--color-cyan);
+  cursor: pointer;
+}
+
+.eq-val {
+  font-size: 7px;
+  color: var(--color-gold);
+  white-space: nowrap;
+}
+
+.eq-label {
+  font-size: 7px;
+  color: var(--text-dim);
+}
+
+/* Recordings list (Media tab) */
+.rec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.rec-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 7px;
+}
+
+.rec-item .rec-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rec-item .retro-btn {
+  font-size: 7px;
+  padding: 3px 4px;
+}

@@ -6,7 +6,13 @@ import {
   AUDIO_EFFECT_CATEGORIES, 
   TextAnimations 
 } from '../engine/EffectsDatabase.js';
-import { AUDIO_EFFECTS } from '../engine/AudioEngine.js';
+import { AUDIO_EFFECTS, EQ_BANDS, EQ_PRESETS, audioEngine } from '../engine/AudioEngine.js';
+
+function eqPresetOf(gains) {
+  const g = gains || EQ_PRESETS.flat.gains;
+  const match = Object.entries(EQ_PRESETS).find(([, p]) => p.gains.every((v, i) => v === g[i]));
+  return match ? match[0] : '';
+}
 
 export function setupInspectorView(timelineEngine) {
   const container = document.getElementById('inspector-content');
@@ -285,6 +291,30 @@ export function setupInspectorView(timelineEngine) {
             <span id="label-audio-effect-intensity" style="font-size: 8px;">${clip.effectIntensity !== undefined ? clip.effectIntensity : 50}%</span>
           </div>
         </div>
+
+        ${(clip.type === 'audio' || clip.audioBuffer) ? `
+        <div class="inspector-group">
+          <div class="group-title">🎚️ ECUALIZADOR (5 BANDAS)</div>
+          <div class="prop-row">
+            <span>PRESET:</span>
+            <select id="prop-eq-preset" class="prop-select">
+              <option value="">-- PERSONALIZADO --</option>
+              ${Object.entries(EQ_PRESETS).map(([id, p]) => `<option value="${id}" ${eqPresetOf(clip.eq) === id ? 'selected' : ''}>${p.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="eq-bands">
+            ${EQ_BANDS.map((band, i) => {
+              const g = (clip.eq && clip.eq[i]) || 0;
+              return `
+              <div class="eq-band">
+                <span class="eq-val" id="eq-val-${i}">${g > 0 ? '+' : ''}${g}dB</span>
+                <input type="range" class="eq-slider" data-band="${i}" min="-12" max="12" step="0.5" value="${g}" title="${band.freq} Hz" />
+                <span class="eq-label">${band.label}</span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+        ` : ''}
 
         <!-- Trim & Precision Editing Controls -->
         <div class="inspector-group">
@@ -572,6 +602,41 @@ export function setupInspectorView(timelineEngine) {
         clip.effectIntensity = parseInt(e.target.value);
         if (labelEffectIntensity) labelEffectIntensity.textContent = `${clip.effectIntensity}%`;
         timelineEngine.notify('clipupdated', { clip });
+      });
+    }
+
+    // Equalizer bindings: replace clip.eq (never mutate) so split/duplicated clips and undo snapshots stay independent
+    const eqPreset = document.getElementById('prop-eq-preset');
+    const eqSliders = container.querySelectorAll('.eq-slider');
+    const applyEq = (gains) => {
+      clip.eq = gains;
+      audioEngine.updateClipEq(clip, timelineEngine.currentTime);
+      eqSliders.forEach((sl, i) => {
+        sl.value = gains[i];
+        const label = document.getElementById(`eq-val-${i}`);
+        if (label) label.textContent = `${gains[i] > 0 ? '+' : ''}${gains[i]}dB`;
+      });
+      if (eqPreset) eqPreset.value = eqPresetOf(gains);
+    };
+    let eqDragging = false;
+    eqSliders.forEach(sl => {
+      sl.addEventListener('input', (e) => {
+        if (!eqDragging) {
+          timelineEngine.pushState('Ecualizar Audio');
+          eqDragging = true;
+        }
+        const gains = [...(clip.eq || EQ_PRESETS.flat.gains)];
+        gains[parseInt(sl.dataset.band, 10)] = parseFloat(e.target.value);
+        applyEq(gains);
+      });
+      sl.addEventListener('change', () => { eqDragging = false; });
+    });
+    if (eqPreset) {
+      eqPreset.addEventListener('change', (e) => {
+        const preset = EQ_PRESETS[e.target.value];
+        if (!preset) return;
+        timelineEngine.pushState('Preset Ecualizador');
+        applyEq([...preset.gains]);
       });
     }
 

@@ -16,7 +16,7 @@ import {
   RetroTransitions, 
   TextAnimations 
 } from '../engine/EffectsDatabase.js';
-import { pickNativeFile, uploadMediaToDisk, getNativeApiBase } from '../engine/NativeBridge.js';
+import { pickNativeFile, uploadMediaToDisk, getNativeApiBase, nativeFetch } from '../engine/NativeBridge.js';
 
 // Local store of imported media assets
 const importedAssets = [];
@@ -37,6 +37,50 @@ export function setupAssetLibrary(timelineEngine) {
 
   let activeAudioCategory = 'all';
   let audioSearchQuery = '';
+
+  // Screen recordings & screenshots saved by the native overlay widget
+  let recordings = [];
+  let recordingsMessage = 'CARGANDO...';
+
+  async function refreshRecordings() {
+    try {
+      const res = await nativeFetch('/api/recordings');
+      const data = await res.json();
+      recordings = data.items || [];
+      recordingsMessage = data.isProcessing ? '⏳ GUARDANDO GRABACIÓN...' : (recordings.length ? '' : 'AÚN NO HAY GRABACIONES. USA EL WIDGET 🔴.');
+      if (data.isProcessing) setTimeout(refreshRecordings, 2000);
+    } catch (_) {
+      recordings = [];
+      recordingsMessage = 'ABRE KIDCUT.EXE PARA GRABAR PANTALLA.';
+    }
+    if (activeTab === 'media') renderTabContent();
+  }
+
+  function renderRecordings(list) {
+    list.innerHTML = recordingsMessage
+      ? `<div style="font-size: 7px; color: var(--text-dim); text-align: center; padding: 8px;">${recordingsMessage}</div>`
+      : '';
+    recordings.forEach(rec => {
+      const isImage = /\.(png|jpe?g|webp|bmp)$/i.test(rec.name);
+      const row = document.createElement('div');
+      row.className = 'rec-item';
+      row.innerHTML = `
+        <span>${isImage ? '📷' : '🎬'}</span>
+        <span class="rec-name" title="${rec.filePath}">${rec.name} · ${rec.sizeMb} MB</span>
+        <button type="button" class="retro-btn btn-rec-add" title="Importar y añadir a la línea de tiempo">+ V1</button>
+        <button type="button" class="retro-btn btn-rec-convert" title="Convertir a otro formato">🔄</button>
+        <button type="button" class="retro-btn btn-rec-reveal" title="Mostrar en el Explorador">📁</button>
+      `;
+      row.querySelector('.btn-rec-add').addEventListener('click', () => handleNativeFile(rec.filePath, rec.name, 'track-v1'));
+      row.querySelector('.btn-rec-convert').addEventListener('click', () => window.__kidcutOpenConverter && window.__kidcutOpenConverter(rec.filePath));
+      row.querySelector('.btn-rec-reveal').addEventListener('click', () => nativeFetch(`/api/reveal?path=${encodeURIComponent(rec.filePath)}`, { method: 'POST' }).catch(() => {}));
+      list.appendChild(row);
+    });
+  }
+
+  // Coming back from recording another window refreshes the list
+  window.addEventListener('focus', refreshRecordings);
+  refreshRecordings();
 
   // Navigation tab switching
   navTabs.forEach(tab => {
@@ -100,10 +144,27 @@ export function setupAssetLibrary(timelineEngine) {
       </div>
 
       <div class="asset-section-title" style="margin-top: 15px;">
+        <span>🔴 GRABACIONES Y CAPTURAS</span>
+        <span class="badge-count">${recordings.length}</span>
+      </div>
+      <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+        <button type="button" id="btn-show-recorder" class="retro-btn" style="flex: 1; font-size: 7px; padding: 5px; color: #ff4466; border-color: #ff4466;" title="Muestra el widget flotante para grabar pantalla, audio del sistema y micrófono">🔴 WIDGET DE GRABACIÓN</button>
+        <button type="button" id="btn-refresh-recs" class="retro-btn" style="font-size: 7px; padding: 5px;" title="Actualizar lista">⟳</button>
+      </div>
+      <div class="rec-list" id="rec-list"></div>
+
+      <div class="asset-section-title" style="margin-top: 15px;">
         <span>BIBLIOTECA DE MEDIOS</span>
       </div>
       <div class="media-grid" id="media-grid"></div>
     `;
+
+    renderRecordings(wrap.querySelector('#rec-list'));
+    wrap.querySelector('#btn-refresh-recs').addEventListener('click', refreshRecordings);
+    wrap.querySelector('#btn-show-recorder').addEventListener('click', async () => {
+      const res = await nativeFetch('/api/overlay/show', { method: 'POST' }).catch(() => null);
+      if (!res || !res.ok) alert('Abre KidCut.exe para usar el widget de grabación de pantalla.');
+    });
 
     const dropzone = wrap.querySelector('#media-dropzone');
     const fileInput = wrap.querySelector('#media-file-input');
@@ -175,7 +236,6 @@ export function setupAssetLibrary(timelineEngine) {
   async function handleNativeFile(filePath, fileName, targetTrack = null) {
     const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(fileName);
     const isAudio = /\.(mp3|wav|ogg|aac|m4a|flac)$/i.test(fileName);
-    const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(fileName);
     const base = (await getNativeApiBase()) || '';
 
     const asset = {
@@ -188,44 +248,72 @@ export function setupAssetLibrary(timelineEngine) {
       hasAudio: false,
       extractingAudio: false
     };
-
-    if (isVideo) {
-      const videoEl = document.createElement('video');
-      videoEl.src = asset.url;
-      videoEl.preload = 'auto';
-      videoEl.onloadedmetadata = () => {
-        asset.duration = videoEl.duration || 5.0;
-        asset.mediaElement = videoEl;
-        renderTabContent();
-        if (targetTrack) {
-          addAssetToTimeline(asset, targetTrack);
-        }
-      };
-    } else if (isImage) {
-      const imgEl = new Image();
-      imgEl.src = asset.url;
-      imgEl.onload = () => {
-        asset.duration = 5.0;
-        asset.mediaElement = imgEl;
-        renderTabContent();
-        if (targetTrack) {
-          addAssetToTimeline(asset, targetTrack);
-        }
-      };
-    } else if (isAudio) {
-      asset.duration = 10.0;
-      const audioEl = new Audio(asset.url);
-      audioEl.onloadedmetadata = () => {
-        asset.duration = audioEl.duration || 10.0;
-        renderTabContent();
-        if (targetTrack) {
-          addAssetToTimeline(asset, targetTrack);
-        }
-      };
-    }
-
     importedAssets.push(asset);
     renderTabContent();
+
+    const loaded = new Promise((resolve) => {
+      if (isVideo) {
+        const videoEl = document.createElement('video');
+        videoEl.src = asset.url;
+        videoEl.preload = 'auto';
+        videoEl.onloadedmetadata = () => {
+          asset.duration = videoEl.duration || 5.0;
+          asset.mediaElement = videoEl;
+          resolve();
+        };
+        videoEl.onerror = resolve;
+      } else if (isAudio) {
+        asset.duration = 10.0;
+        resolve();
+      } else {
+        const imgEl = new Image();
+        imgEl.src = asset.url;
+        imgEl.onload = () => {
+          asset.duration = 5.0;
+          asset.mediaElement = imgEl;
+          resolve();
+        };
+        imgEl.onerror = resolve;
+      }
+    });
+
+    await Promise.all([loaded, (isVideo || isAudio) ? loadNativeAudio(asset, base) : null]);
+    renderTabContent();
+    if (targetTrack) {
+      addAssetToTimeline(asset, targetTrack);
+    }
+    return asset;
+  }
+
+  // Decodes audio through FFmpeg so every container works (MKV/MOV/AVI) and multi-track recordings keep their channels
+  async function loadNativeAudio(asset, base) {
+    asset.extractingAudio = true;
+    renderTabContent();
+    try {
+      const pathParam = encodeURIComponent(asset.filePath);
+      const probe = await (await nativeFetch(`/api/probe?path=${pathParam}`)).json();
+      const count = probe.audioStreams || 0;
+      // Overlay recordings store [mix, system, mic]: import the two separate channels instead of the mix
+      const streams = count >= 3 ? [1, 2] : (count > 0 ? [0] : []);
+      const names = count >= 3 ? ['SISTEMA', 'MIC'] : ['AUDIO'];
+      audioEngine.init();
+      asset.audioChannels = [];
+      for (let k = 0; k < streams.length; k++) {
+        const res = await (await nativeFetch(`/api/extract-audio?path=${pathParam}&stream=${streams[k]}`)).json();
+        if (!res.success) continue;
+        const wav = await (await fetch(`${base}/api/file?path=${encodeURIComponent(res.filePath)}`)).arrayBuffer();
+        const buffer = await audioEngine.ctx.decodeAudioData(wav);
+        asset.audioChannels.push({ name: names[k], buffer, filePath: res.filePath });
+      }
+      if (asset.audioChannels.length > 0) {
+        asset.audioBuffer = asset.audioChannels[0].buffer;
+        asset.hasAudio = true;
+        if (asset.type === 'audio' || !probe.duration) asset.duration = asset.audioBuffer.duration;
+      }
+    } catch (err) {
+      console.warn('No se pudo extraer el audio del archivo nativo:', err);
+    }
+    asset.extractingAudio = false;
   }
 
   function handleFiles(fileList) {
@@ -407,6 +495,10 @@ export function setupAssetLibrary(timelineEngine) {
       timelineEngine.pushState(`Añadir Video ${asset.name} (${isOverlay ? 'Overlay V2' : 'V1'})`);
 
       // 1. Add video clip to designated track (track-v1 or track-v2)
+      const channels = (asset.audioChannels && asset.audioChannels.length)
+        ? asset.audioChannels
+        : (asset.audioBuffer ? [{ name: 'AUDIO', buffer: asset.audioBuffer }] : []);
+
       const videoClip = timelineEngine.addClip(targetTrackId, {
         name: isOverlay ? `${asset.name} (OVERLAY)` : asset.name,
         type: 'video',
@@ -414,6 +506,7 @@ export function setupAssetLibrary(timelineEngine) {
         duration: dur,
         mediaElement: asset.mediaElement,
         audioBuffer: asset.audioBuffer,
+        isMuted: channels.length > 0, // its sound lives on the linked audio clips below; avoids playing it twice
         file: asset.file,
         filePath: asset.filePath,
         _nativePath: asset.filePath || asset._nativePath,
@@ -424,23 +517,29 @@ export function setupAssetLibrary(timelineEngine) {
         y: isOverlay ? 0.25 : 0.5
       }, true);
 
-      // 2. Automatically link its original audio on Audio Track (A1 or A2) so user has full multitrack control
-      if (asset.audioBuffer) {
-        const audioTrackId = isOverlay ? 'track-a2' : 'track-a1';
-        timelineEngine.addClip(audioTrackId, {
-          name: `${asset.name} (AUDIO)`,
+      // 2. Link each audio channel on its own audio track (A1, A2, ... created on demand) for full multitrack control
+      const audioTracks = timelineEngine.tracks.filter(t => t.type === 'audio');
+      const firstAudioIdx = isOverlay ? 1 : 0;
+      channels.forEach((ch, k) => {
+        let track = audioTracks[firstAudioIdx + k];
+        if (!track) {
+          track = timelineEngine.addTrack('audio');
+          audioTracks.push(track);
+        }
+        timelineEngine.addClip(track.id, {
+          name: `${asset.name} (${ch.name})`,
           type: 'audio',
           start: curTime,
           duration: dur,
-          audioBuffer: asset.audioBuffer,
+          audioBuffer: ch.buffer,
           file: asset.file,
-          filePath: asset.filePath,
-          _nativePath: asset.filePath || asset._nativePath,
+          filePath: ch.filePath || asset.filePath,
+          _nativePath: ch.filePath || asset.filePath || asset._nativePath,
           _assetRef: asset,
           _uploadPromise: asset._uploadPromise,
           sourceVideoClipId: videoClip ? videoClip.id : null
         }, true);
-      }
+      });
     } else if (asset.type === 'image') {
       const isOverlay = targetTrackId === 'track-v2';
       timelineEngine.addClip(targetTrackId, {
