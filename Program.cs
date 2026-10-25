@@ -29,6 +29,22 @@ namespace KidCut
         public static HttpServer Server;
         public static KidCutControlForm MainForm;
         public static RecorderOverlay Overlay;
+        public static readonly string RuntimeDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "runtime");
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibrary(string path);
+
+        // ONNX Runtime and its dependencies live in runtime\ (any version: the copies there are the ones we ship)
+        private static void SetupRuntimeFolder()
+        {
+            AppDomain.CurrentDomain.AssemblyResolve += (s, e) =>
+            {
+                string file = Path.Combine(RuntimeDir, new System.Reflection.AssemblyName(e.Name).Name + ".dll");
+                return File.Exists(file) ? System.Reflection.Assembly.LoadFrom(file) : null;
+            };
+            string native = Path.Combine(RuntimeDir, "onnxruntime.dll");
+            if (File.Exists(native)) LoadLibrary(native);
+        }
         // UI-thread context; unlike MainForm.BeginInvoke it survives the control form recreating its handle when hidden
         private static SynchronizationContext _uiContext;
 
@@ -59,6 +75,7 @@ namespace KidCut
             }
             catch { }
 
+            SetupRuntimeFolder();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -2141,6 +2158,7 @@ namespace KidCut
         private static readonly Stopwatch _clock = new Stopwatch();
         private static Process _ffmpeg;
         private static StringBuilder _ffmpegErr = new StringBuilder();
+        private static CameraFeed _feed;
         private static WasapiCapture _sys;
         private static WasapiCapture _mic;
         private static string _videoTemp;
@@ -2196,37 +2214,27 @@ namespace KidCut
                 new[] { string.Format("-f lavfi -i ddagrab=output_idx=0:framerate={0}:draw_mouse=1", fps), "hwdownload,format=bgra," },
                 new[] { string.Format("-f gdigrab -framerate {0} -draw_mouse 1 -i desktop", fps), "" }
             };
-            // Webcam at 720p, then at its default mode, and finally without camera so the take still happens
-            List<string> cameraModes = new List<string>();
             string camera = captureCamera ? FindCamera() : null;
-            if (camera != null)
-            {
-                cameraModes.Add("-video_size 1280x720 -framerate 30 ");
-                cameraModes.Add("");
-            }
-            cameraModes.Add(null);
+            if (captureCamera && camera == null) LastError = "No se encontró ninguna cámara; se graba sin cámara.";
 
-            string cameraError = "";
-            foreach (string camMode in cameraModes)
+            foreach (string[] screen in screens)
             {
-                foreach (string[] screen in screens)
+                if (camera != null)
                 {
-                    _clock.Restart();
-                    _ffmpeg = LaunchCapture(screen[0], screen[1], camMode == null ? null : camera, camMode, fps);
-                    if (!_ffmpeg.WaitForExit(camMode == null ? 1500 : 2500))
-                    {
-                        if (captureCamera && camMode == null)
-                        {
-                            LastError = camera == null
-                                ? "No se encontró ninguna cámara; se graba sin cámara."
-                                : "No se pudo abrir la cámara (¿la usa otra app?); se graba sin cámara.\n\n" + cameraError.Trim();
-                        }
-                        IsRecording = true;
-                        return;
-                    }
-                    _ffmpeg.WaitForExit(); // flush stderr
-                    if (camMode != null) lock (_ffmpegErr) cameraError = _ffmpegErr.ToString();
+                    // The framed camera (background, shape, border) is rendered here and piped in, exactly like the bubble
+                    CameraStyle style = CameraStyle.Current;
+                    int baseWidth = PhysicalScreenSize().Width / (style.Shape == "rect" ? 4 : 5);
+                    _feed = new CameraFeed(style, camera, CameraFrames.CanvasSize(style, baseWidth * style.SizePercent / 100));
+                    _feed.Start();
                 }
+                _clock.Restart();
+                _ffmpeg = LaunchCapture(screen[0], screen[1], _feed, fps);
+                if (!_ffmpeg.WaitForExit(1500))
+                {
+                    IsRecording = true;
+                    return;
+                }
+                StopFeed();
             }
             StopAudio();
             _clock.Reset();
@@ -2250,6 +2258,7 @@ namespace KidCut
             {
                 try { _ffmpeg.Kill(); } catch { }
             }
+            StopFeed();
             _finishThread = new Thread(Finish) { IsBackground = true };
             _finishThread.Start();
         }
@@ -2261,6 +2270,12 @@ namespace KidCut
             if (_finishThread != null) _finishThread.Join(120000);
         }
 
+        private static void StopFeed()
+        {
+            if (_feed != null) _feed.Stop();
+            _feed = null;
+        }
+
         private static void StopAudio()
         {
             if (_sys != null) _sys.RequestStop();
@@ -2269,44 +2284,28 @@ namespace KidCut
             if (_mic != null) _mic.Join();
         }
 
-        private static Process LaunchCapture(string screenInput, string screenFilter, string camera, string cameraMode, int fps)
+        private static Process LaunchCapture(string screenInput, string screenFilter, CameraFeed feed, int fps)
         {
             string video;
-            if (camera == null)
+            if (feed == null)
             {
                 video = screenFilter.Length > 0 ? string.Format("{0} -vf {1}", screenInput, screenFilter.TrimEnd(',')) : screenInput;
             }
             else
             {
-                // Picture-in-picture bottom-right, shaped by the designer's mask and border PNGs. Both sources are stamped with
-                // their arrival wall-clock: their own clocks differ and overlay would otherwise stall waiting for the camera.
-                CameraStyle style = CameraStyle.Current;
-                Size cam = CameraFrames.CanvasSize(style, PhysicalScreenSize().Width / (style.Shape == "rect" ? 4 : 5));
-                string mask = Path.Combine(Program.ScratchDir, "rec_cam_mask.png");
-                string border = Path.Combine(Program.ScratchDir, "rec_cam_border.png");
-                using (Bitmap m = CameraFrames.RenderMask(style, cam)) m.Save(mask, ImageFormat.Png);
-                using (Bitmap b = CameraFrames.RenderBorder(style, cam)) b.Save(border, ImageFormat.Png);
-                string extraInputs = "";
-                if (CameraFrames.UsesPlate(style)) extraInputs += string.Format("-i \"{0}\" ", CameraFrames.PlatePath);
-                if (CameraFrames.UsesBackgroundImage(style))
-                {
-                    string bg = Path.Combine(Program.ScratchDir, "rec_cam_background.png");
-                    using (Bitmap b = CameraFrames.RenderBackground(style.Background, style.Colors, cam)) b.Save(bg, ImageFormat.Png);
-                    extraInputs += string.Format("-i \"{0}\" ", bg);
-                }
-                string camGraph = CameraFrames.Graph(style, cam, "[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000),", "[4:v]", "[5:v]", "c0");
-                // Same spot where the user last left the on-screen bubble (bottom-right by default)
+                // Same spot where the user last left the on-screen bubble (bottom-right by default). Both sources are
+                // stamped with their arrival wall-clock so overlay pairs them by real time.
+                Size cam = feed.Size;
                 Size phys = PhysicalScreenSize();
-                PointF frac = CameraBubble.PositionFraction(style);
+                PointF frac = CameraBubble.PositionFraction(CameraStyle.Current);
                 int camX = Math.Max(0, Math.Min(phys.Width - cam.Width, (int)(frac.X * phys.Width)));
                 int camY = Math.Max(0, Math.Min(phys.Height - cam.Height, (int)(frac.Y * phys.Height)));
                 video = string.Format(
-                    "{0} -f dshow -rtbufsize 256M {1}-i \"video={2}\" -i \"{3}\" -i \"{4}\" {5}-filter_complex \"" +
-                    "[0:v]{6}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];{7};" +
-                    "[c0]format=yuva420p[c];[2:v]format=gray[m];[c][m]alphamerge[cm];" +
-                    // CFR on the output side: an fps filter would pad up to the camera's EOF stamp (its own device clock) on stop
-                    "[cm][3:v]overlay=0:0[pip];[scr][pip]overlay={9}:{10}:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {8}",
-                    screenInput, cameraMode, camera, mask, border, extraInputs, screenFilter, camGraph, fps, camX, camY);
+                    "{0} -f rawvideo -pix_fmt bgra -video_size {1}x{2} -framerate 30 -i \"{3}\" -filter_complex \"" +
+                    "[0:v]{4}setpts=(RTCTIME-RTCSTART)/(TB*1000000)[scr];[1:v]setpts=(RTCTIME-RTCSTART)/(TB*1000000)[pip];" +
+                    // CFR on the output side: an fps filter could pad up to a stale EOF stamp on stop
+                    "[scr][pip]overlay={5}:{6}:eof_action=repeat[v]\" -map \"[v]\" -fps_mode cfr -r {7}",
+                    screenInput, cam.Width, cam.Height, feed.PipePath, screenFilter, camX, camY, fps);
             }
             string args = string.Format("-y -hide_banner -nostats -loglevel error {0} {1} -g {2} \"{3}\"", video, EncoderArgs(), fps * 2, _videoTemp);
             try
@@ -2469,6 +2468,7 @@ namespace KidCut
         public bool Mirror { get; set; }
         public double? PosX { get; set; } // camera top-left as a fraction of the primary screen; null = bottom-right
         public double? PosY { get; set; }
+        public int SizePercent { get; set; } // camera size: 30..100 % of its original size
 
         public static readonly CameraStyle Current = Load();
 
@@ -2492,6 +2492,7 @@ namespace KidCut
             if (!CameraFrames.Has(CameraFrames.Filters, s.Filter)) s.Filter = "none";
             if (!CameraFrames.Has(CameraFrames.Backgrounds, s.Background)) s.Background = "none";
             if (!(s.PosX >= 0 && s.PosX <= 1 && s.PosY >= 0 && s.PosY <= 1)) s.PosX = s.PosY = null;
+            if (s.SizePercent < 30 || s.SizePercent > 100) s.SizePercent = 100;
             if (s.Colors == null || s.Colors.Length == 0 || s.Colors.Length > 8 || !s.Colors.All(CameraFrames.IsHexColor))
             {
                 s.Colors = new[] { "#FF2244", "#FFD200" };
@@ -2535,7 +2536,7 @@ namespace KidCut
             new[] { "pixel", "Pixel 8-bit", "scale={0}/5:-2:flags=area,scale={0}:{1}:flags=neighbor" }
         };
 
-        // "none" keeps the real room; every other one replaces it using the empty-room capture (PlatePath)
+        // "none" keeps the real room; every other one is painted behind the person found by PersonSegmenter
         public static readonly string[][] Backgrounds =
         {
             new[] { "none", "Sin fondo (real)" }, new[] { "blur", "Desenfocado" }, new[] { "studio", "Estudio" },
@@ -2549,42 +2550,12 @@ namespace KidCut
             new[] { "mosaic", "Mosaico 8-bit" }
         };
 
-        // Empty-room snapshot at the camera's native size; the person is whatever differs from it
-        public static string PlatePath
-        {
-            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "kidcut_camera_plate.png"); }
-        }
-
-        public static bool UsesPlate(CameraStyle s)
-        {
-            return s.Background != "none" && File.Exists(PlatePath);
-        }
-
-        public static bool UsesBackgroundImage(CameraStyle s)
-        {
-            return UsesPlate(s) && s.Background != "blur";
-        }
-
-        // Camera processing graph: fit to canvas, optional background replacement, color filter and mirror.
-        // camIn includes the input label and any prefix filters; plateIn/bgIn are input labels (used only when needed).
-        public static string Graph(CameraStyle s, Size size, string camIn, string plateIn, string bgIn, string outLabel)
+        // FFmpeg side of the camera: fit to canvas, color filter and mirror, as BGR frames for CameraProcessor
+        public static string CameraChain(CameraStyle s, Size size)
         {
             string fit = string.Format("scale={0}:{1}:force_original_aspect_ratio=increase,crop={0}:{1}", size.Width, size.Height);
             string extra = Filters.First(r => r[0] == s.Filter)[2];
-            string post = (extra.Length > 0 ? "," + string.Format(extra, size.Width, size.Height) : "") + (s.Mirror ? ",hflip" : "");
-            if (!UsesPlate(s)) return string.Format("{0}{1},format=rgb24{2}[{3}]", camIn, fit, post, outLabel);
-
-            StringBuilder g = new StringBuilder();
-            g.AppendFormat("{0}{1},format=rgb24,split=3[k0][k1][k2];", camIn, fit);
-            g.AppendFormat("{0}{1},format=rgb24[pl];", plateIn, fit);
-            // Person mask = pixels that differ from the empty room; erosion drops sensor noise, dilation fills holes, blur softens edges
-            g.Append("[k0][pl]blend=all_mode=difference,format=gray,lut=c0='if(gt(val,28),255,0)',erosion,dilation,dilation,dilation,gblur=sigma=3[pm];");
-            g.Append("[k1]format=rgba[kp];[kp][pm]alphamerge[person];");
-            if (s.Background == "blur") g.Append("[k2]gblur=sigma=18[bg];");
-            // The still image is laid over the live feed so the background stream keeps the camera's timing
-            else g.AppendFormat("{0}scale={1}:{2},format=rgb24[bimg];[k2][bimg]overlay=0:0:eof_action=repeat[bg];", bgIn, size.Width, size.Height);
-            g.AppendFormat("[bg][person]overlay=0:0,format=rgb24{0}[{1}]", post, outLabel);
-            return g.ToString();
+            return fit + (extra.Length > 0 ? "," + string.Format(extra, size.Width, size.Height) : "") + (s.Mirror ? ",hflip" : "") + ",format=bgr24";
         }
 
         public static readonly string[][] Palettes =
@@ -2715,19 +2686,6 @@ namespace KidCut
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             return g;
-        }
-
-        // White shape on black: FFmpeg alphamerge uses it as the camera's transparency
-        public static Bitmap RenderMask(CameraStyle s, Size sz)
-        {
-            Bitmap bmp = new Bitmap(sz.Width, sz.Height, PixelFormat.Format32bppArgb);
-            using (Graphics g = HighQuality(bmp))
-            using (GraphicsPath p = ShapePath(s.Shape, ShapeRect(sz)))
-            {
-                g.Clear(Color.Black);
-                g.FillPath(Brushes.White, p);
-            }
-            return bmp;
         }
 
         public static Bitmap RenderBorder(CameraStyle s, Size sz)
@@ -3157,22 +3115,14 @@ namespace KidCut
             return bmp;
         }
 
-        // Same camera mode order as the recorder (720p first) so the empty-room capture lines up with the live feed
+        // 720p first (wide field of view), then the camera's default mode
         public const string HdMode = "-video_size 1280x720 -framerate 30 ";
 
-        // Live camera through the shared graph, as raw BGR frames on stdout (designer preview and on-screen bubble)
-        public static Process StartCamera(CameraStyle s, Size size, string camera, bool hd, string tag)
+        // Live camera as raw BGR frames on stdout, already fitted, filtered and mirrored
+        public static Process StartCamera(CameraStyle s, Size size, string camera, bool hd)
         {
-            string inputs = "";
-            if (UsesPlate(s)) inputs += string.Format("-i \"{0}\" ", PlatePath);
-            if (UsesBackgroundImage(s))
-            {
-                string bg = Path.Combine(Program.ScratchDir, tag + "_background.png");
-                using (Bitmap b = RenderBackground(s.Background, s.Colors, size)) b.Save(bg, ImageFormat.Png);
-                inputs += string.Format("-i \"{0}\" ", bg);
-            }
-            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" {2}-filter_complex \"{3}\" -map \"[out]\" -f rawvideo -pix_fmt bgr24 -",
-                hd ? HdMode : "", camera, inputs, Graph(s, size, "[0:v]", "[1:v]", "[2:v]", "out"));
+            string args = string.Format("-hide_banner -loglevel error -f dshow {0}-i \"video={1}\" -vf \"{2}\" -f rawvideo -pix_fmt bgr24 -",
+                hd ? HdMode : "", camera, CameraChain(s, size));
             Process p = new Process
             {
                 StartInfo = new ProcessStartInfo(FfmpegEngine.FfmpegPath, args)
@@ -3189,8 +3139,9 @@ namespace KidCut
             return p;
         }
 
-        // Blocks reading frames until the stream ends or keepGoing() is false; onFrame owns each bitmap
-        public static void ReadCameraFrames(Process p, Size size, Func<bool> keepGoing, Action<Bitmap> onFrame)
+        // Blocks reading frames until the stream ends or keepGoing() is false; the processor (fetched per frame so it can be
+        // swapped live) paints the virtual background; onFrame owns each bitmap
+        public static void ReadCameraFrames(Process p, Size size, Func<CameraProcessor> processor, Func<bool> keepGoing, Action<Bitmap> onFrame)
         {
             int stride = size.Width * 3, frameBytes = stride * size.Height;
             byte[] buf = new byte[frameBytes];
@@ -3206,12 +3157,42 @@ namespace KidCut
                 }
                 if (read < frameBytes) return;
 
-                Bitmap frame = new Bitmap(size.Width, size.Height, PixelFormat.Format24bppRgb);
-                BitmapData data = frame.LockBits(new Rectangle(Point.Empty, size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-                for (int y = 0; y < size.Height; y++) Marshal.Copy(buf, y * stride, data.Scan0 + y * data.Stride, stride);
-                frame.UnlockBits(data);
-                onFrame(frame);
+                CameraProcessor proc = processor();
+                if (proc != null) proc.Process(buf);
+                onFrame(BgrToBitmap(buf, size));
             }
+        }
+
+        public static Bitmap BgrToBitmap(byte[] bgr, Size size)
+        {
+            int stride = size.Width * 3;
+            Bitmap frame = new Bitmap(size.Width, size.Height, PixelFormat.Format24bppRgb);
+            BitmapData data = frame.LockBits(new Rectangle(Point.Empty, size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            for (int y = 0; y < size.Height; y++) Marshal.Copy(bgr, y * stride, data.Scan0 + y * data.Stride, stride);
+            frame.UnlockBits(data);
+            return frame;
+        }
+
+        public static byte[] BitmapToBgr(Bitmap bmp)
+        {
+            int w = bmp.Width, h = bmp.Height, stride = w * 3;
+            byte[] bgr = new byte[stride * h];
+            using (Bitmap b24 = bmp.Clone(new Rectangle(0, 0, w, h), PixelFormat.Format24bppRgb))
+            {
+                BitmapData data = b24.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                for (int y = 0; y < h; y++) Marshal.Copy(data.Scan0 + y * data.Stride, bgr, y * stride, stride);
+                b24.UnlockBits(data);
+            }
+            return bgr;
+        }
+
+        // Straight-alpha BGRA bytes of a 32bpp ARGB bitmap (rawvideo input for FFmpeg)
+        public static void BitmapToBgra(Bitmap bmp, byte[] dest)
+        {
+            int w = bmp.Width, h = bmp.Height, stride = w * 4;
+            BitmapData data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            for (int y = 0; y < h; y++) Marshal.Copy(data.Scan0 + y * data.Stride, dest, y * stride, stride);
+            bmp.UnlockBits(data);
         }
 
         // Camera (or a silhouette placeholder when null) inside the shape, plus the border on top
@@ -3276,6 +3257,281 @@ namespace KidCut
         }
     }
 
+    // Person segmentation with the MediaPipe Selfie Segmentation model on ONNX Runtime (runtime\ folder).
+    // ORT types stay inside this class so a missing runtime only disables virtual backgrounds.
+    public static class PersonSegmenter
+    {
+        public const int Size = 256;
+        private static readonly object _lock = new object();
+        private static object _session;
+        private static bool _tried;
+        public static string Error;
+
+        public static bool Available
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    if (!_tried)
+                    {
+                        _tried = true;
+                        try { Load(); }
+                        catch (Exception ex) { Error = ex.Message; }
+                    }
+                    return _session != null;
+                }
+            }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void Load()
+        {
+            Microsoft.ML.OnnxRuntime.SessionOptions so = new Microsoft.ML.OnnxRuntime.SessionOptions();
+            so.IntraOpNumThreads = 2;
+            _session = new Microsoft.ML.OnnxRuntime.InferenceSession(Path.Combine(Program.RuntimeDir, "selfie_segmentation.onnx"), so);
+        }
+
+        // BGR frame (w x h) -> person probability 0..1 on a Size x Size grid
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static float[] Segment(byte[] bgr, int w, int h)
+        {
+            if (!Available) return null;
+            int plane = Size * Size;
+            float[] input = new float[3 * plane];
+            for (int y = 0; y < Size; y++)
+            {
+                int sy = y * h / Size;
+                for (int x = 0; x < Size; x++)
+                {
+                    int src = (sy * w + x * w / Size) * 3, dst = y * Size + x;
+                    input[dst] = bgr[src + 2] / 255f;             // R
+                    input[plane + dst] = bgr[src + 1] / 255f;     // G
+                    input[2 * plane + dst] = bgr[src] / 255f;     // B
+                }
+            }
+            Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float> tensor =
+                new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(input, new[] { 1, 3, Size, Size });
+            Microsoft.ML.OnnxRuntime.NamedOnnxValue[] inputs = { Microsoft.ML.OnnxRuntime.NamedOnnxValue.CreateFromTensor("pixel_values", tensor) };
+            using (var results = ((Microsoft.ML.OnnxRuntime.InferenceSession)_session).Run(inputs))
+            {
+                return results.First().AsEnumerable<float>().ToArray();
+            }
+        }
+    }
+
+    // Paints the chosen virtual background behind the person, in place on each BGR camera frame
+    public class CameraProcessor
+    {
+        private readonly int _w, _h;
+        private readonly string _background;
+        private readonly byte[] _bg; // null for "none" and "blur"
+        private float[] _mask;
+
+        public CameraProcessor(CameraStyle s, Size size)
+        {
+            _w = size.Width;
+            _h = size.Height;
+            _background = s.Background;
+            if (_background != "none" && _background != "blur")
+            {
+                using (Bitmap b = CameraFrames.RenderBackground(_background, s.Colors, size)) _bg = CameraFrames.BitmapToBgr(b);
+            }
+        }
+
+        public bool Active
+        {
+            get { return _background != "none" && PersonSegmenter.Available; }
+        }
+
+        public void Process(byte[] bgr)
+        {
+            if (!Active) return;
+            float[] mask = PersonSegmenter.Segment(bgr, _w, _h);
+            if (mask == null) return;
+            // Light temporal smoothing keeps the edge from flickering between frames
+            if (_mask == null) _mask = mask;
+            else for (int i = 0; i < mask.Length; i++) _mask[i] = _mask[i] * 0.35f + mask[i] * 0.65f;
+
+            byte[] blur = _background == "blur" ? Blur(bgr) : null;
+            byte[] bg = blur ?? _bg;
+            int n = PersonSegmenter.Size;
+            float sx = (float)(n - 1) / Math.Max(1, _w - 1), sy = (float)(n - 1) / Math.Max(1, _h - 1);
+            for (int y = 0; y < _h; y++)
+            {
+                float fy = y * sy;
+                int y0 = (int)fy, y1 = Math.Min(n - 1, y0 + 1);
+                float ty = fy - y0;
+                for (int x = 0; x < _w; x++)
+                {
+                    float fx = x * sx;
+                    int x0 = (int)fx, x1 = Math.Min(n - 1, x0 + 1);
+                    float tx = fx - x0;
+                    float a = (_mask[y0 * n + x0] * (1 - tx) + _mask[y0 * n + x1] * tx) * (1 - ty)
+                            + (_mask[y1 * n + x0] * (1 - tx) + _mask[y1 * n + x1] * tx) * ty;
+                    // Sharpen the soft model output a little so hair and shoulders get a cleaner edge
+                    a = Math.Max(0f, Math.Min(1f, (a - 0.3f) / 0.4f));
+                    int i = (y * _w + x) * 3;
+                    bgr[i] = (byte)(bgr[i] * a + bg[i] * (1 - a));
+                    bgr[i + 1] = (byte)(bgr[i + 1] * a + bg[i + 1] * (1 - a));
+                    bgr[i + 2] = (byte)(bgr[i + 2] * a + bg[i + 2] * (1 - a));
+                }
+            }
+        }
+
+        // Strong blur of the camera frame: average 12x12 blocks, then bilinear upscale
+        private byte[] Blur(byte[] bgr)
+        {
+            const int k = 12;
+            int sw = Math.Max(2, _w / k), sh = Math.Max(2, _h / k);
+            float[] small = new float[sw * sh * 3];
+            int[] count = new int[sw * sh];
+            for (int y = 0; y < _h; y++)
+            {
+                int cy = Math.Min(sh - 1, y * sh / _h);
+                for (int x = 0; x < _w; x++)
+                {
+                    int c = cy * sw + Math.Min(sw - 1, x * sw / _w), i = (y * _w + x) * 3;
+                    small[c * 3] += bgr[i];
+                    small[c * 3 + 1] += bgr[i + 1];
+                    small[c * 3 + 2] += bgr[i + 2];
+                    count[c]++;
+                }
+            }
+            for (int c = 0; c < count.Length; c++)
+            {
+                if (count[c] == 0) continue;
+                small[c * 3] /= count[c];
+                small[c * 3 + 1] /= count[c];
+                small[c * 3 + 2] /= count[c];
+            }
+            byte[] outp = new byte[bgr.Length];
+            for (int y = 0; y < _h; y++)
+            {
+                float fy = Math.Max(0, (y + 0.5f) * sh / _h - 0.5f);
+                int y0 = Math.Min(sh - 1, (int)fy), y1 = Math.Min(sh - 1, y0 + 1);
+                float ty = fy - y0;
+                for (int x = 0; x < _w; x++)
+                {
+                    float fx = Math.Max(0, (x + 0.5f) * sw / _w - 0.5f);
+                    int x0 = Math.Min(sw - 1, (int)fx), x1 = Math.Min(sw - 1, x0 + 1);
+                    float tx = fx - x0;
+                    int i = (y * _w + x) * 3;
+                    for (int ch = 0; ch < 3; ch++)
+                    {
+                        float v = (small[(y0 * sw + x0) * 3 + ch] * (1 - tx) + small[(y0 * sw + x1) * 3 + ch] * tx) * (1 - ty)
+                                + (small[(y1 * sw + x0) * 3 + ch] * (1 - tx) + small[(y1 * sw + x1) * 3 + ch] * tx) * ty;
+                        outp[i + ch] = (byte)v;
+                    }
+                }
+            }
+            return outp;
+        }
+    }
+
+    // Hidden-camera recording: renders the framed camera in C# (same look as the bubble) and streams it to the
+    // recorder's FFmpeg through a named pipe at a steady 30 fps, with alpha
+    public class CameraFeed
+    {
+        private readonly CameraStyle _style;
+        private readonly string _camera;
+        private readonly Size _size;
+        private readonly Bitmap _border;
+        private readonly GraphicsPath _clip;
+        private readonly CameraProcessor _processor;
+        private readonly object _frameLock = new object();
+        private byte[] _latest;
+        private System.IO.Pipes.NamedPipeServerStream _pipe;
+        private Process _proc;
+        private volatile bool _stop;
+
+        public string PipePath { get; private set; }
+        public Size Size { get { return _size; } }
+
+        public CameraFeed(CameraStyle style, string camera, Size size)
+        {
+            _style = style;
+            _camera = camera;
+            _size = size;
+            _border = CameraFrames.RenderBorder(style, size);
+            _clip = CameraFrames.ShapePath(style.Shape, CameraFrames.ShapeRect(size));
+            _processor = new CameraProcessor(style, size);
+            _latest = new byte[size.Width * size.Height * 4];
+            using (Bitmap placeholder = CameraFrames.Compose(null, size, _clip, _border)) CameraFrames.BitmapToBgra(placeholder, _latest);
+        }
+
+        public void Start()
+        {
+            string name = "kidcut_cam_" + Process.GetCurrentProcess().Id + "_" + Environment.TickCount;
+            PipePath = @"\\.\pipe\" + name;
+            _pipe = new System.IO.Pipes.NamedPipeServerStream(name, System.IO.Pipes.PipeDirection.Out, 1,
+                System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.None, 0, _latest.Length * 2);
+            new Thread(WriteLoop) { IsBackground = true }.Start();
+            StartCamera(true);
+        }
+
+        private void WriteLoop()
+        {
+            try
+            {
+                _pipe.WaitForConnection();
+                Stopwatch clock = Stopwatch.StartNew();
+                long frame = 0;
+                byte[] copy = new byte[_latest.Length];
+                while (!_stop)
+                {
+                    lock (_frameLock) Buffer.BlockCopy(_latest, 0, copy, 0, copy.Length);
+                    _pipe.Write(copy, 0, copy.Length);
+                    frame++;
+                    long wait = frame * 1000 / 30 - clock.ElapsedMilliseconds;
+                    if (wait > 0) Thread.Sleep((int)wait);
+                }
+            }
+            catch { } // FFmpeg closed the pipe (recording stopped)
+        }
+
+        private void StartCamera(bool hd)
+        {
+            if (_stop) return;
+            Process p = CameraFrames.StartCamera(_style, _size, _camera, hd);
+            _proc = p;
+            new Thread(() =>
+            {
+                bool any = false;
+                byte[] bgra = new byte[_latest.Length];
+                CameraFrames.ReadCameraFrames(p, _size, () => _processor, () => !_stop && _proc == p, frame =>
+                {
+                    any = true;
+                    using (frame)
+                    using (Bitmap composed = CameraFrames.Compose(frame, _size, _clip, _border))
+                    {
+                        CameraFrames.BitmapToBgra(composed, bgra);
+                    }
+                    lock (_frameLock) Buffer.BlockCopy(bgra, 0, _latest, 0, bgra.Length);
+                });
+                if (!any && !_stop && _proc == p)
+                {
+                    if (hd) StartCamera(false); // camera without 720p
+                    else ScreenRecorder.LastError = "No se pudo abrir la cámara (¿la usa otra app?); se graba la silueta de ejemplo.";
+                }
+            }) { IsBackground = true }.Start();
+        }
+
+        public void Stop()
+        {
+            _stop = true;
+            Process p = _proc;
+            _proc = null;
+            try
+            {
+                if (p != null && !p.HasExited) p.Kill();
+                if (p != null) p.WaitForExit(2000);
+            }
+            catch { }
+            try { _pipe.Dispose(); } catch { }
+        }
+    }
+
     // Frame designer: live camera preview in the middle, surrounded by the shape, border, filter and color selectors
     public class CameraStyleForm : Form
     {
@@ -3296,9 +3552,8 @@ namespace KidCut
         private Process _camProcess;
         private volatile bool _closing;
         private readonly Button _btnMirror;
-        private readonly Button _btnPlate;
-        private int _countdown;
-        private System.Windows.Forms.Timer _countdownTimer;
+        private readonly Label _lblSize;
+        private volatile CameraProcessor _processor;
 
         public static void ShowDesigner()
         {
@@ -3375,8 +3630,18 @@ namespace KidCut
             }
 
             // Under the preview: mirror toggle
-            _btnMirror = AddAction("↔ ESPEJO", new Rectangle((ClientSize.Width - 130) / 2, _preview.Bottom + 28, 130, 28), () => { _style.Mirror = !_style.Mirror; ApplyStyle(true); });
+            // Under the preview: mirror toggle and camera size (smaller, bigger, back to original)
+            int row = _preview.Bottom + 28, center = ClientSize.Width / 2;
+            _btnMirror = AddAction("↔ ESPEJO", new Rectangle(center - 200, row, 130, 28), () => { _style.Mirror = !_style.Mirror; ApplyStyle(true); });
             _tips.SetToolTip(_btnMirror, "Voltea la cámara horizontalmente (como un espejo)");
+            Button smaller = AddAction("−", new Rectangle(center - 50, row, 30, 28), () => ChangeSize(-10));
+            _lblSize = new Label { Location = new Point(center - 18, row), Size = new Size(110, 28), TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.White };
+            Controls.Add(_lblSize);
+            Button bigger = AddAction("+", new Rectangle(center + 94, row, 30, 28), () => ChangeSize(10));
+            Button original = AddAction("Original", new Rectangle(center + 130, row, 70, 28), () => ChangeSize(100));
+            _tips.SetToolTip(smaller, "Hacer la cámara más pequeña en pantalla y en la grabación");
+            _tips.SetToolTip(bigger, "Hacer la cámara más grande (hasta su tamaño original)");
+            _tips.SetToolTip(original, "Volver al tamaño original (100 %)");
 
             // Bottom: colors and gradients
             AddTitle("COLOR / DEGRADADO", 0, 466, ClientSize.Width);
@@ -3385,26 +3650,23 @@ namespace KidCut
             for (int i = 0; i < n; i++)
             {
                 string[] colors = CameraFrames.Palettes[i];
-                Button b = AddOption("color", string.Join(",", colors), "", CameraFrames.RenderSwatch(colors, 30), new Rectangle(sx + i * 42, 490, 38, 38), () => { _style.Colors = colors; ApplyStyle(_style.Background == "frame"); });
+                Button b = AddOption("color", string.Join(",", colors), "", CameraFrames.RenderSwatch(colors, 30), new Rectangle(sx + i * 42, 490, 38, 38), () => { _style.Colors = colors; ApplyStyle(false); });
                 _tips.SetToolTip(b, colors.Length == 1 ? "Color " + colors[0] : "Degradado " + string.Join(" → ", colors));
             }
             int cx = sx + n * 42 + 8;
             Button custom = AddAction("Color propio...", new Rectangle(cx, 490, 104, 38), () => PickColors(1));
             Button gradient = AddAction("Degradado propio...", new Rectangle(cx + 110, 490, 120, 38), () => PickColors(2));
 
-            // Bottom: virtual backgrounds (two rows of thumbnails) + empty-room capture
+            // Bottom: virtual backgrounds (two rows of thumbnails), painted behind the person found by the AI model
             AddTitle("FONDO VIRTUAL", 0, 540, ClientSize.Width);
-            int perRow = 13, tx = (ClientSize.Width - (perRow * 44 + 176)) / 2;
+            int perRow = 13, tx = (ClientSize.Width - perRow * 44) / 2;
             for (int i = 0; i < CameraFrames.Backgrounds.Length; i++)
             {
                 string id = CameraFrames.Backgrounds[i][0];
                 Image thumb = id == "none" ? null : CameraFrames.RenderBackground(id, _style.Colors, new Size(32, 32));
-                Button b = AddOption("background", id, id == "none" ? "✕" : "", thumb, new Rectangle(tx + (i % perRow) * 44, 564 + (i / perRow) * 44, 40, 40), () => { _style.Background = id; ApplyStyle(true); });
+                Button b = AddOption("background", id, id == "none" ? "✕" : "", thumb, new Rectangle(tx + (i % perRow) * 44, 564 + (i / perRow) * 44, 40, 40), () => { _style.Background = id; ApplyStyle(false); });
                 _tips.SetToolTip(b, CameraFrames.Backgrounds[i][1]);
             }
-            _btnPlate = AddAction("📸 Capturar fondo vacío", new Rectangle(tx + perRow * 44 + 6, 564, 170, 84), CaptureEmptyBackground);
-            _btnPlate.Font = new Font("Segoe UI Emoji", 9);
-            _tips.SetToolTip(_btnPlate, "Sal del encuadre: en 3 segundos se toma una foto de la habitación vacía. Todo lo que no sea igual a ella (tú) se conserva y el resto se reemplaza por el fondo elegido.");
             _tips.SetToolTip(custom, "Elegir cualquier color sólido");
             _tips.SetToolTip(gradient, "Elegir dos colores para un degradado");
 
@@ -3501,7 +3763,7 @@ namespace KidCut
                 }
             }
             _style.Colors = picked.ToArray();
-            ApplyStyle(_style.Background == "frame");
+            ApplyStyle(false);
         }
 
         // Shape and filter change what FFmpeg delivers, so the camera feed restarts; border/colors only redraw the overlay
@@ -3522,11 +3784,24 @@ namespace KidCut
                 _border = CameraFrames.RenderBorder(_style, _canvas);
                 _clip = CameraFrames.ShapePath(_style.Shape, CameraFrames.ShapeRect(_canvas));
             }
+            // Swapped live: the reader thread picks it up on the next frame, no camera restart for a new background
+            _processor = new CameraProcessor(_style, _canvas);
+            _lblSize.Text = "Tamaño: " + _style.SizePercent + " %";
             if (restartCamera) StartPreview();
             else if (_camProcess == null || _camProcess.HasExited) ShowFrame(null);
+            if (_style.Background != "none" && !PersonSegmenter.Available)
+            {
+                _status.Text = "Fondos no disponibles: falta la carpeta runtime (" + PersonSegmenter.Error + ")";
+            }
         }
 
-        private const string HdMode = CameraFrames.HdMode;
+        // Size only changes how big the camera is on screen and in the recording; the preview stays full size
+        private void ChangeSize(int delta)
+        {
+            _style.SizePercent = delta == 100 ? 100 : Math.Max(30, Math.Min(100, _style.SizePercent + delta));
+            _lblSize.Text = "Tamaño: " + _style.SizePercent + " %";
+            _style.Save();
+        }
 
         private void StartPreview()
         {
@@ -3550,7 +3825,7 @@ namespace KidCut
             }
             Size size = _canvas;
             _hd = hd;
-            Process p = CameraFrames.StartCamera(_style, size, camera, hd, "preview");
+            Process p = CameraFrames.StartCamera(_style, size, camera, hd);
             _camProcess = p;
             _status.Text = "Abriendo cámara...";
             new Thread(() => ReadFrames(p, size)) { IsBackground = true }.Start();
@@ -3572,14 +3847,12 @@ namespace KidCut
         private void ReadFrames(Process p, Size size)
         {
             bool any = false;
-            CameraFrames.ReadCameraFrames(p, size, () => !_closing && _camProcess == p, frame =>
+            CameraFrames.ReadCameraFrames(p, size, () => _processor, () => !_closing && _camProcess == p, frame =>
             {
                 if (!any)
                 {
                     any = true;
-                    SetStatus(_style.Background != "none" && !File.Exists(CameraFrames.PlatePath)
-                        ? "Para usar el fondo: pulsa \"Capturar fondo vacío\" y sal del encuadre."
-                        : "Vista previa en vivo");
+                    SetStatus("Vista previa en vivo");
                 }
                 ShowFrame(frame);
             });
@@ -3598,57 +3871,6 @@ namespace KidCut
         }
 
         private volatile bool _hd = true;
-
-        // Countdown so the user can step out of frame, then one still of the empty room at the recorder's camera mode
-        private void CaptureEmptyBackground()
-        {
-            string camera = ScreenRecorder.FindCamera();
-            if (camera == null || ScreenRecorder.IsRecording || _countdownTimer != null) return;
-            _countdown = 3;
-            _btnPlate.Enabled = false;
-            _countdownTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-            _status.Text = "¡Sal del encuadre! Captura en 3...";
-            _countdownTimer.Tick += (s, e) =>
-            {
-                _countdown--;
-                if (_countdown > 0)
-                {
-                    _status.Text = "¡Sal del encuadre! Captura en " + _countdown + "...";
-                    return;
-                }
-                _countdownTimer.Dispose();
-                _countdownTimer = null;
-                _status.Text = "Capturando la habitación vacía...";
-                StopPreview();
-                bool hd = _hd;
-                new Thread(() =>
-                {
-                    string err = null;
-                    string tmp = CameraFrames.PlatePath + ".tmp.png";
-                    // Skip the first frames so auto-exposure settles
-                    string args = string.Format("-f dshow {0}-i \"video={1}\" -vf \"select=gte(n\\,20)\" -frames:v 1 -update 1 \"{2}\"", hd ? HdMode : "", camera, tmp);
-                    if (MediaTools.Ffmpeg(args, 20000, out err) == 0 && File.Exists(tmp))
-                    {
-                        File.Copy(tmp, CameraFrames.PlatePath, true);
-                        File.Delete(tmp);
-                        err = null;
-                    }
-                    else if (string.IsNullOrEmpty(err)) err = "sin imagen";
-                    try
-                    {
-                        BeginInvoke((MethodInvoker)delegate
-                        {
-                            _btnPlate.Enabled = true;
-                            if (_style.Background == "none") _style.Background = "blur";
-                            ApplyStyle(true);
-                            _status.Text = err == null ? "✔ Fondo vacío capturado. Vuelve al encuadre." : "No se pudo capturar: " + err;
-                        });
-                    }
-                    catch { }
-                }) { IsBackground = true }.Start();
-            };
-            _countdownTimer.Start();
-        }
 
         private void SetStatus(string text)
         {
@@ -3697,6 +3919,9 @@ namespace KidCut
         private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, IntPtr pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
 
         [DllImport("user32.dll")]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll")]
         private static extern IntPtr GetDC(IntPtr hWnd);
 
         [DllImport("user32.dll")]
@@ -3730,6 +3955,9 @@ namespace KidCut
         private readonly GraphicsPath _clip;
         private Process _cam;
         private volatile bool _stopped;
+        private readonly CameraProcessor _processor;
+        private Bitmap _lastFull;
+        private Point? _moveTo;
 
         public static void ShowBubble()
         {
@@ -3771,8 +3999,15 @@ namespace KidCut
             Rectangle scr = Screen.PrimaryScreen.Bounds;
             if (s.PosX.HasValue && s.PosY.HasValue) return new PointF((float)s.PosX.Value, (float)s.PosY.Value);
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            Size sz = LogicalSize(s);
+            Size sz = ScaledSize(s);
             return new PointF((float)(wa.Right - sz.Width - 24) / scr.Width, (float)(wa.Bottom - sz.Height - 24) / scr.Height);
+        }
+
+        // On-screen size after the user's size choice (30..100 %)
+        public static Size ScaledSize(CameraStyle s)
+        {
+            Size full = LogicalSize(s);
+            return new Size(Math.Max(16, full.Width * s.SizePercent / 100), Math.Max(16, full.Height * s.SizePercent / 100));
         }
 
         private CameraBubble()
@@ -3784,11 +4019,12 @@ namespace KidCut
             StartPosition = FormStartPosition.Manual;
             Rectangle scr = Screen.PrimaryScreen.Bounds;
             _canvas = LogicalSize(_style);
-            Size = _canvas;
+            Size = ScaledSize(_style);
             PointF frac = PositionFraction(_style);
             Location = new Point(scr.X + (int)(frac.X * scr.Width), scr.Y + (int)(frac.Y * scr.Height));
             _border = CameraFrames.RenderBorder(_style, _canvas);
             _clip = CameraFrames.ShapePath(_style.Shape, CameraFrames.ShapeRect(_canvas));
+            _processor = new CameraProcessor(_style, _canvas);
 
             MouseDown += (s, e) =>
             {
@@ -3796,6 +4032,15 @@ namespace KidCut
                 ReleaseCapture();
                 SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); // drag like a title bar
             };
+            MouseWheel += (s, e) => ChangeSize(e.Delta > 0 ? 10 : -10);
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Items.Add("➖  Más pequeña", null, (s, e) => ChangeSize(-10));
+            menu.Items.Add("➕  Más grande", null, (s, e) => ChangeSize(10));
+            menu.Items.Add("↺  Tamaño original (100 %)", null, (s, e) => ChangeSize(100));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("🎨  Marco y fondo...", null, (s, e) => CameraStyleForm.ShowDesigner());
+            menu.Items.Add("🙈  Ocultar de la pantalla", null, (s, e) => HideBubble());
+            ContextMenuStrip = menu;
             Move += (s, e) =>
             {
                 _style.PosX = Math.Max(0, Math.Min(1, (double)(Left - scr.X) / scr.Width));
@@ -3821,25 +4066,64 @@ namespace KidCut
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            using (Bitmap placeholder = CameraFrames.Compose(null, _canvas, _clip, _border)) SetBitmap(placeholder);
+            Display(CameraFrames.Compose(null, _canvas, _clip, _border));
             StartCamera(true);
+        }
+
+        // Shrink/grow around the bubble's center; 100 = back to the original size
+        private void ChangeSize(int delta)
+        {
+            Size before = ScaledSize(_style);
+            Point center = new Point(Left + before.Width / 2, Top + before.Height / 2);
+            _style.SizePercent = delta == 100 ? 100 : Math.Max(30, Math.Min(100, _style.SizePercent + delta));
+            Size after = ScaledSize(_style);
+            _moveTo = new Point(center.X - after.Width / 2, center.Y - after.Height / 2);
+            if (_lastFull != null) Display(null);
+            _style.Save();
+        }
+
+        // Shows a full-size composed frame (or re-shows the last one when null) at the chosen size
+        private void Display(Bitmap full)
+        {
+            if (full != null)
+            {
+                if (_lastFull != null) _lastFull.Dispose();
+                _lastFull = full;
+            }
+            if (_lastFull == null) return;
+            Size target = ScaledSize(_style);
+            if (target == _lastFull.Size)
+            {
+                SetBitmap(_lastFull);
+                return;
+            }
+            using (Bitmap scaled = new Bitmap(target.Width, target.Height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(scaled))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.DrawImage(_lastFull, new Rectangle(Point.Empty, target));
+                }
+                SetBitmap(scaled);
+            }
         }
 
         private void StartCamera(bool hd)
         {
             string camera = ScreenRecorder.FindCamera();
             if (camera == null || _stopped) return;
-            Process p = CameraFrames.StartCamera(_style, _canvas, camera, hd, "bubble");
+            Process p = CameraFrames.StartCamera(_style, _canvas, camera, hd);
             _cam = p;
             new Thread(() =>
             {
                 bool any = false;
-                CameraFrames.ReadCameraFrames(p, _canvas, () => !_stopped && _cam == p, frame =>
+                CameraFrames.ReadCameraFrames(p, _canvas, () => _processor, () => !_stopped && _cam == p, frame =>
                 {
                     any = true;
                     Bitmap composed = CameraFrames.Compose(frame, _canvas, _clip, _border);
                     frame.Dispose();
-                    try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) SetBitmap(composed); composed.Dispose(); }); }
+                    try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) Display(composed); else composed.Dispose(); }); }
                     catch { composed.Dispose(); }
                 });
                 // Camera without 720p: retry with its default mode
@@ -3876,7 +4160,14 @@ namespace KidCut
                 SIZE size = new SIZE { Cx = bmp.Width, Cy = bmp.Height };
                 POINT src = new POINT();
                 BLENDFUNCTION blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-                UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memDc, ref src, 0, ref blend, 2); // ULW_ALPHA
+                if (_moveTo.HasValue)
+                {
+                    // A resize moves the window too, so it grows/shrinks around its center
+                    POINT dst = new POINT { X = _moveTo.Value.X, Y = _moveTo.Value.Y };
+                    _moveTo = null;
+                    UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
+                }
+                else UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memDc, ref src, 0, ref blend, 2); // ULW_ALPHA
             }
             finally
             {
@@ -4153,6 +4444,12 @@ namespace KidCut
             bool hasCamera = _camSearched && ScreenRecorder.FindCamera() != null;
             _btnCam.Enabled = hasCamera && !rec && !busy;
             _btnShow.Enabled = hasCamera && _camOn && !rec && !busy;
+            if (_camOn && _showOn && hasCamera && !CameraBubble.IsActive)
+            {
+                // Hidden from the bubble's own menu
+                _showOn = false;
+                RefreshToggles();
+            }
             string camTip = !_camSearched ? "Buscando cámara..."
                 : hasCamera ? "Grabar también la cámara (" + ScreenRecorder.FindCamera() + ") en una esquina"
                 : "No se encontró ninguna cámara";
