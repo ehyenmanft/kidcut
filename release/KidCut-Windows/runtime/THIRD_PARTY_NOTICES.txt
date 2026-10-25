@@ -1,0 +1,14 @@
+KidCut uses these third-party components for camera person segmentation (virtual backgrounds):
+
+- ONNX Runtime 1.31.0 (onnxruntime.dll, Microsoft.ML.OnnxRuntime.dll)
+  Copyright (c) Microsoft Corporation. MIT License.
+  https://github.com/microsoft/onnxruntime
+
+- System.Memory, System.Buffers, System.Numerics.Vectors, System.Runtime.CompilerServices.Unsafe
+  Copyright (c) .NET Foundation and Contributors. MIT License.
+  https://github.com/dotnet/runtime
+
+- MediaPipe Selfie Segmentation model (selfie_segmentation.onnx)
+  Copyright Google LLC. Apache License 2.0.
+  ONNX conversion: https://huggingface.co/onnx-community/mediapipe_selfie_segmentation
+  https://github.com/google-ai-edge/mediapipe

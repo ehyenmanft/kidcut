@@ -17,7 +17,8 @@ if ($LASTEXITCODE -ne 0) {
 # 2. Compilar KidCut.exe con csc.exe
 Write-Host "`n[2/4] Compilando ejecutable nativo KidCut.exe..." -ForegroundColor Green
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /target:winexe /win32icon:icon.ico /r:System.Web.Extensions.dll /out:KidCut.exe Program.cs
+$netstandard = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\netstandard.dll"
+& $csc /target:winexe /win32icon:icon.ico /r:System.Web.Extensions.dll /r:runtime\Microsoft.ML.OnnxRuntime.dll /r:runtime\System.Memory.dll /r:$netstandard /out:KidCut.exe Program.cs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de KidCut.exe."
     exit 1
@@ -36,6 +37,7 @@ Copy-Item (Join-Path $baseDir "KidCut.exe") $releaseDir -Force
 Copy-Item (Join-Path $baseDir "icon.ico") $releaseDir -Force
 Copy-Item (Join-Path $baseDir "dist") $releaseDir -Recurse -Force
 Copy-Item (Join-Path $baseDir "public") $releaseDir -Recurse -Force
+Copy-Item (Join-Path $baseDir "runtime") $releaseDir -Recurse -Force # ONNX Runtime + person segmentation model
 
 # Crear archivo LEEME.txt de instrucciones
 $readmeLines = @(
