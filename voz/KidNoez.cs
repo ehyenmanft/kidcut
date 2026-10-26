@@ -9,24 +9,24 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-// KidVoz: real-time microphone enhancer, independent from KidCut. Captures a microphone, cleans it (whine notches,
+// KidNoez: real-time microphone enhancer, independent from KidCut. Captures a microphone, cleans it (whine notches,
 // spectral noise suppression, gate, automatic level, compressor, limiter; or the ASMR voicing) and plays it into an
 // output device: a virtual cable (other apps then use its other end as their microphone) or headphones to listen.
-namespace KidVoz
+namespace KidNoez
 {
     static class Program
     {
         [STAThread]
         static void Main(string[] args)
         {
-            // Self-check / offline use: KidVoz.exe --test in.wav out.wav [asmr]
+            // Self-check / offline use: KidNoez.exe --test in.wav out.wav [asmr]
             if (args.Length >= 3 && args[0] == "--test")
             {
                 Environment.ExitCode = OfflineTest(args[1], args[2], args.Length > 3 && args[3] == "asmr");
                 return;
             }
             bool created;
-            using (new Mutex(true, "KidVoz.SingleInstance", out created))
+            using (new Mutex(true, "KidNoez.SingleInstance", out created))
             {
                 if (!created) return;
                 Application.EnableVisualStyles();
@@ -534,7 +534,7 @@ namespace KidVoz
             Stop();
             Error = null;
             _stop = false;
-            _thread = new Thread(() => Run(inputId, outputId)) { IsBackground = true, Name = "KidVoz audio" };
+            _thread = new Thread(() => Run(inputId, outputId)) { IsBackground = true, Name = "KidNoez audio" };
             _thread.SetApartmentState(ApartmentState.MTA);
             _thread.Start();
         }
@@ -757,7 +757,7 @@ namespace KidVoz
         readonly ToolStripMenuItem _miToggle, _miAsmr, _miShow;
         readonly Icon _iconOn = TrayIcon(true), _iconOff = TrayIcon(false);
         readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 60 };
-        readonly string _settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "KidVoz.ini");
+        readonly string _settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "KidNoez.ini");
         bool _loading, _collapsed, _showSettings, _asmrOn, _quitting;
         DateTime _lastActive = DateTime.Now;
 
@@ -766,7 +766,7 @@ namespace KidVoz
 
         public MainForm()
         {
-            Text = "KidVoz";
+            Text = "KidNoez";
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -778,7 +778,7 @@ namespace KidVoz
             Opacity = ActiveOpacity;
             Width = W;
 
-            _title.Text = "🎙 KidVoz";
+            _title.Text = "🎙 KidNoez";
             _title.ForeColor = TitleC;
             _title.Font = new Font("Segoe UI", 9.5f, FontStyle.Italic);
             _title.Bounds = new Rectangle(12, 6, 200, 20);
@@ -946,7 +946,7 @@ namespace KidVoz
         void UpdateTitle()
         {
             // Collapsed: the header alone still says whether the enhancement is on
-            _title.Text = _collapsed ? "🎙 KidVoz · " + (_toggle.On ? (_asmrOn ? "ASMR" : "ON") : "OFF") : "🎙 KidVoz";
+            _title.Text = _collapsed ? "🎙 KidNoez · " + (_toggle.On ? (_asmrOn ? "ASMR" : "ON") : "OFF") : "🎙 KidNoez";
             _title.ForeColor = _collapsed ? (_toggle.On ? OnC : OffC) : TitleC;
         }
 
@@ -1025,7 +1025,7 @@ namespace KidVoz
             _miToggle.Text = on ? "Desactivar mejora" : "Activar mejora";
             _miAsmr.Checked = _asmrOn;
             _tray.Icon = on ? _iconOn : _iconOff;
-            _tray.Text = on ? (_asmrOn ? "KidVoz: activa · ASMR" : "KidVoz: activa · voz limpia") : "KidVoz: desactivada";
+            _tray.Text = on ? (_asmrOn ? "KidNoez: activa · ASMR" : "KidNoez: activa · voz limpia") : "KidNoez: desactivada";
             UpdateTitle();
             AudioDevice o = _output.SelectedItem as AudioDevice;
             if (o != null)
