@@ -716,72 +716,238 @@ namespace KidVoz
             using (Font f = new Font("Segoe UI", Width / 7f, FontStyle.Bold))
             using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                 g.DrawString(_on ? "ON" : "OFF", f, Brushes.White, ClientRectangle, sf);
-            if (Focused) using (Pen p = new Pen(Color.FromArgb(255, 210, 0), 2) { DashStyle = DashStyle.Dot }) g.DrawEllipse(p, 9, 9, Width - 19, Height - 19);
+            if (Focused && ShowFocusCues) using (Pen p = new Pen(Color.FromArgb(255, 210, 0), 2) { DashStyle = DashStyle.Dot }) g.DrawEllipse(p, 9, 9, Width - 19, Height - 19);
         }
     }
 
+    class Meter : Control
+    {
+        float _v;
+        public float Value { set { if (Math.Abs(value - _v) > 0.005f) { _v = value; Invalidate(); } } }
+
+        public Meter() { DoubleBuffered = true; }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Color.FromArgb(38, 42, 54));
+            Color c = _v > 0.92f ? Color.FromArgb(255, 210, 90) : Color.FromArgb(125, 255, 178);
+            using (SolidBrush b = new SolidBrush(c)) e.Graphics.FillRectangle(b, 0, 0, (int)(Width * _v), Height);
+        }
+    }
+
+    // Floating panel styled like the live translator: frameless, always on top, dark translucent rounded panel, small
+    // header buttons, drag anywhere, collapses to its header, fades when idle. Lives in the tray: left click switches
+    // the enhancement on/off (green/red icon), right click opens the menu; closing the panel only hides it.
     class MainForm : Form
     {
-        static readonly Color Bg = Color.FromArgb(14, 10, 28), Panel = Color.FromArgb(30, 26, 55), Text1 = Color.FromArgb(235, 230, 250);
+        static readonly Color Bg = Color.FromArgb(10, 12, 20), Chip = Color.FromArgb(32, 36, 48), Text1 = Color.FromArgb(200, 208, 220),
+            TitleC = Color.FromArgb(155, 232, 255), OnC = Color.FromArgb(125, 255, 178), OffC = Color.FromArgb(255, 107, 107);
+        const int W = 320, HeaderH = 30, BodyH = 106, SettingsH = 172;
+        const double ActiveOpacity = 0.94, FadedOpacity = 0.45;
+
         readonly AudioEngine _engine = new AudioEngine();
         readonly RoundToggle _toggle = new RoundToggle();
-        readonly CheckBox _asmr = new CheckBox();
+        readonly Label _title = new Label(), _state = new Label(), _status = new Label();
+        readonly Button _asmr, _btnSettings, _btnCollapse;
         readonly ComboBox _input = new ComboBox(), _output = new ComboBox();
-        readonly Label _status = new Label(), _state = new Label();
-        readonly ProgressBar _meterIn = new ProgressBar(), _meterOut = new ProgressBar();
+        readonly Meter _meterIn = new Meter(), _meterOut = new Meter();
+        readonly Panel _settings = new Panel();
+        readonly ToolTip _tips = new ToolTip();
+        readonly NotifyIcon _tray = new NotifyIcon();
+        readonly ToolStripMenuItem _miToggle, _miAsmr, _miShow;
+        readonly Icon _iconOn = TrayIcon(true), _iconOff = TrayIcon(false);
         readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 60 };
         readonly string _settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "KidVoz.ini");
-        bool _loading;
+        bool _loading, _collapsed, _showSettings, _asmrOn, _quitting;
+        DateTime _lastActive = DateTime.Now;
+
+        [DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         public MainForm()
         {
             Text = "KidVoz";
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
             BackColor = Bg;
             ForeColor = Text1;
-            Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(360, 500);
-            StartPosition = FormStartPosition.CenterScreen;
+            Font = new Font("Segoe UI", 9f);
+            Opacity = ActiveOpacity;
+            Width = W;
 
-            Label title = new Label { Text = "KidVoz · mejora de voz", Font = new Font("Segoe UI", 13, FontStyle.Bold), AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Bounds = new Rectangle(0, 12, 360, 30) };
-            _toggle.Bounds = new Rectangle(100, 52, 160, 160);
+            _title.Text = "🎙 KidVoz";
+            _title.ForeColor = TitleC;
+            _title.Font = new Font("Segoe UI", 9.5f, FontStyle.Italic);
+            _title.Bounds = new Rectangle(12, 6, 200, 20);
+            _tips.SetToolTip(_title, "Arrastra para mover · Clic en el icono de la bandeja: activar/desactivar");
+            HeaderButton("✕", "Ocultar en la bandeja (Salir: clic derecho en el icono de la bandeja)", W - 12 - 24, () => ShowPanel(false), true);
+            _btnCollapse = HeaderButton("–", "Minimizar (colapsar al cintillo)", W - 12 - 52, () => { _collapsed = !_collapsed; LayoutPanel(); SaveSettings(); }, false);
+            _btnSettings = HeaderButton("⚙", "Micrófono y salida", W - 12 - 80, () => { _showSettings = !_showSettings; _collapsed = false; LayoutPanel(); SaveSettings(); }, false);
+
+            _toggle.Bounds = new Rectangle(14, HeaderH + 6, 92, 92);
             _toggle.Toggled += (s, e) => Apply();
-            _state.Bounds = new Rectangle(0, 216, 360, 22);
-            _state.TextAlign = ContentAlignment.MiddleCenter;
+            _tips.SetToolTip(_toggle, "Activar / desactivar la mejora de voz");
+            _state.Bounds = new Rectangle(118, HeaderH + 10, W - 130, 22);
+            _state.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
+            _asmr = new Button
+            {
+                Text = "✨ Modo ASMR",
+                Bounds = new Rectangle(118, HeaderH + 40, 130, 26),
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                TabStop = false
+            };
+            _asmr.FlatAppearance.BorderSize = 1;
+            _asmr.Click += (s, e) => { _asmrOn = !_asmrOn; Apply(); };
+            _tips.SetToolTip(_asmr, "Voz íntima y cercana: conserva susurros y respiración, más aire y detalle");
+            _meterIn.Bounds = new Rectangle(118, HeaderH + 78, W - 132, 6);
+            _meterOut.Bounds = new Rectangle(118, HeaderH + 90, W - 132, 6);
+            _tips.SetToolTip(_meterIn, "Entrada (micrófono)");
+            _tips.SetToolTip(_meterOut, "Salida (voz procesada)");
 
-            _asmr.Text = "Modo ASMR (susurros y detalle cercano)";
-            _asmr.Bounds = new Rectangle(24, 244, 320, 24);
-            _asmr.ForeColor = Text1;
-            _asmr.CheckedChanged += (s, e) => Apply();
-
-            Label li = new Label { Text = "Micrófono", Bounds = new Rectangle(24, 276, 312, 18) };
-            _input.Bounds = new Rectangle(24, 294, 312, 24);
-            Label lo = new Label { Text = "Enviar la voz a", Bounds = new Rectangle(24, 324, 312, 18) };
-            _output.Bounds = new Rectangle(24, 342, 312, 24);
+            _settings.Bounds = new Rectangle(0, HeaderH + BodyH, W, SettingsH);
+            _settings.BackColor = Bg;
+            Label li = new Label { Text = "Micrófono", Bounds = new Rectangle(14, 2, W - 28, 18) };
+            _input.Bounds = new Rectangle(14, 20, W - 28, 24);
+            Label lo = new Label { Text = "Enviar la voz a", Bounds = new Rectangle(14, 50, W - 28, 18) };
+            _output.Bounds = new Rectangle(14, 68, W - 28, 24);
+            _status.Bounds = new Rectangle(14, 100, W - 28, 66);
+            _status.ForeColor = Color.FromArgb(150, 158, 175);
             foreach (ComboBox c in new[] { _input, _output })
             {
                 c.DropDownStyle = ComboBoxStyle.DropDownList;
-                c.BackColor = Panel;
+                c.BackColor = Chip;
                 c.ForeColor = Text1;
                 c.FlatStyle = FlatStyle.Flat;
                 c.SelectedIndexChanged += (s, e) => { if (!_loading) Restart(); };
             }
+            _settings.Controls.AddRange(new Control[] { li, _input, lo, _output, _status });
+            Controls.AddRange(new Control[] { _title, _toggle, _state, _asmr, _meterIn, _meterOut, _settings });
+            foreach (Control c in new Control[] { this, _title, _state, _settings, li, lo, _status }) c.MouseDown += Drag;
 
-            Label lmi = new Label { Text = "Entrada", Bounds = new Rectangle(24, 376, 60, 16) };
-            _meterIn.Bounds = new Rectangle(86, 378, 250, 12);
-            Label lmo = new Label { Text = "Salida", Bounds = new Rectangle(24, 396, 60, 16) };
-            _meterOut.Bounds = new Rectangle(86, 398, 250, 12);
-            _status.Bounds = new Rectangle(16, 418, 328, 76);
-            _status.ForeColor = Color.FromArgb(190, 180, 220);
-
-            Controls.AddRange(new Control[] { title, _toggle, _state, _asmr, li, _input, lo, _output, lmi, _meterIn, lmo, _meterOut, _status });
+            _miToggle = new ToolStripMenuItem("Activar mejora", null, (s, e) => { _toggle.On = !_toggle.On; Apply(); });
+            _miToggle.Font = new Font(_miToggle.Font, FontStyle.Bold);
+            _miAsmr = new ToolStripMenuItem("Modo ASMR", null, (s, e) => { _asmrOn = !_asmrOn; Apply(); });
+            _miShow = new ToolStripMenuItem("Mostrar panel", null, (s, e) => ShowPanel(!Visible));
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Items.AddRange(new ToolStripItem[] { _miToggle, _miAsmr, new ToolStripSeparator(), _miShow, new ToolStripMenuItem("Salir", null, (s, e) => Quit()) });
+            _tray.ContextMenuStrip = menu;
+            _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { _toggle.On = !_toggle.On; Apply(); } };
+            _tray.Icon = _iconOn;
+            _tray.Visible = true;
 
             LoadDevicesAndSettings();
             _timer.Tick += (s, e) => Tick();
             _timer.Start();
-            FormClosing += (s, e) => { SaveSettings(); _engine.Stop(); };
+            FormClosing += (s, e) =>
+            {
+                if (!_quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; ShowPanel(false); }
+            };
+        }
+
+        Button HeaderButton(string text, string tip, int x, Action click, bool danger)
+        {
+            Button b = new Button
+            {
+                Text = text,
+                Bounds = new Rectangle(x, 5, 24, 20),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Chip,
+                ForeColor = Text1,
+                Font = new Font("Segoe UI Symbol", 8f),
+                Cursor = Cursors.Hand,
+                TabStop = false
+            };
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = danger ? Color.FromArgb(220, 60, 60) : Color.FromArgb(72, 78, 94);
+            b.Click += (s, e) => click();
+            _tips.SetToolTip(b, tip);
+            Controls.Add(b);
+            return b;
+        }
+
+        // Tray icon drawn at runtime: the app's round button, green when the enhancement is on, red when off
+        static Icon TrayIcon(bool on)
+        {
+            using (Bitmap bmp = new Bitmap(32, 32))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle r = new Rectangle(1, 1, 29, 29);
+                using (LinearGradientBrush b = new LinearGradientBrush(r, on ? Color.FromArgb(80, 235, 130) : Color.FromArgb(245, 80, 90),
+                                                                       on ? Color.FromArgb(8, 110, 55) : Color.FromArgb(140, 15, 35), 90f))
+                    g.FillEllipse(b, r);
+                using (Pen ring = new Pen(Color.White, 2)) g.DrawEllipse(ring, r);
+                using (GraphicsPath cap = new GraphicsPath())
+                {
+                    cap.AddArc(12, 6, 8, 8, 180, 180);
+                    cap.AddArc(12, 12, 8, 8, 0, 180);
+                    cap.CloseFigure();
+                    g.FillPath(Brushes.White, cap);
+                }
+                using (Pen p = new Pen(Color.White, 2))
+                {
+                    g.DrawArc(p, 9, 10, 14, 13, 0, 180);
+                    g.DrawLine(p, 16, 23, 16, 26);
+                    g.DrawLine(p, 12, 26, 20, 26);
+                }
+                return Icon.FromHandle(bmp.GetHicon());
+            }
+        }
+
+        void Drag(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            ReleaseCapture();
+            SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); // WM_NCLBUTTONDOWN on caption
+            SaveSettings();
+        }
+
+        void ShowPanel(bool show)
+        {
+            if (show) { Show(); Activate(); _lastActive = DateTime.Now; }
+            else Hide();
+            _miShow.Text = show ? "Ocultar panel" : "Mostrar panel";
+        }
+
+        void Quit()
+        {
+            _quitting = true;
+            SaveSettings();
+            _engine.Stop();
+            _tray.Visible = false;
+            Application.Exit();
+        }
+
+        void LayoutPanel()
+        {
+            foreach (Control c in new Control[] { _toggle, _state, _asmr, _meterIn, _meterOut }) c.Visible = !_collapsed;
+            _settings.Visible = !_collapsed && _showSettings;
+            Height = HeaderH + (_collapsed ? 0 : BodyH + (_showSettings ? SettingsH : 0));
+            _btnCollapse.Text = _collapsed ? "▢" : "–";
+            _tips.SetToolTip(_btnCollapse, _collapsed ? "Restaurar" : "Minimizar (colapsar al cintillo)");
+            _btnSettings.ForeColor = _showSettings ? TitleC : Text1;
+            using (GraphicsPath p = new GraphicsPath())
+            {
+                const int R = 24;
+                p.AddArc(0, 0, R, R, 180, 90);
+                p.AddArc(Width - R, 0, R, R, 270, 90);
+                p.AddArc(Width - R, Height - R, R, R, 0, 90);
+                p.AddArc(0, Height - R, R, R, 90, 90);
+                p.CloseFigure();
+                Region = new Region(p);
+            }
+            UpdateTitle();
+        }
+
+        void UpdateTitle()
+        {
+            // Collapsed: the header alone still says whether the enhancement is on
+            _title.Text = _collapsed ? "🎙 KidVoz · " + (_toggle.On ? (_asmrOn ? "ASMR" : "ON") : "OFF") : "🎙 KidVoz";
+            _title.ForeColor = _collapsed ? (_toggle.On ? OnC : OffC) : TitleC;
         }
 
         void LoadDevicesAndSettings()
@@ -806,7 +972,17 @@ namespace KidVoz
             }
             catch (Exception ex) { _status.Text = "No se pudieron listar los dispositivos: " + ex.Message; }
             _toggle.On = !st.TryGetValue("on", out v) || v == "1";
-            _asmr.Checked = st.TryGetValue("asmr", out v) && v == "1";
+            _asmrOn = st.TryGetValue("asmr", out v) && v == "1";
+            _collapsed = st.TryGetValue("collapsed", out v) && v == "1";
+            _showSettings = st.TryGetValue("settings", out v) && v == "1";
+            LayoutPanel();
+            int x, y;
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            if (st.TryGetValue("x", out v) && int.TryParse(v, out x) && st.TryGetValue("y", out v) && int.TryParse(v, out y) &&
+                Screen.AllScreens.Any(s => s.WorkingArea.Contains(x + 20, y + 10)))
+                Location = new Point(x, y);
+            else
+                Location = new Point(wa.Right - W - 30, wa.Bottom - Height - 30);
             _loading = false;
             Restart();
         }
@@ -838,45 +1014,70 @@ namespace KidVoz
 
         void Apply()
         {
-            _engine.Dsp.Enabled = _toggle.On;
-            _engine.Dsp.Asmr = _asmr.Checked;
-            _state.Text = _toggle.On ? (_asmr.Checked ? "Mejora activa · ASMR" : "Mejora activa · voz limpia") : "Desactivada · el micrófono pasa tal cual";
-            _state.ForeColor = _toggle.On ? Color.FromArgb(110, 235, 150) : Color.FromArgb(250, 120, 130);
+            bool on = _toggle.On;
+            _engine.Dsp.Enabled = on;
+            _engine.Dsp.Asmr = _asmrOn;
+            _state.Text = on ? (_asmrOn ? "Activa · ASMR" : "Activa · voz limpia") : "Desactivada";
+            _state.ForeColor = on ? OnC : OffC;
+            _asmr.BackColor = _asmrOn ? Color.FromArgb(60, 48, 96) : Chip;
+            _asmr.ForeColor = _asmrOn ? Color.FromArgb(255, 225, 120) : Text1;
+            _asmr.FlatAppearance.BorderColor = _asmrOn ? Color.FromArgb(255, 225, 120) : Color.FromArgb(60, 66, 82);
+            _miToggle.Text = on ? "Desactivar mejora" : "Activar mejora";
+            _miAsmr.Checked = _asmrOn;
+            _tray.Icon = on ? _iconOn : _iconOff;
+            _tray.Text = on ? (_asmrOn ? "KidVoz: activa · ASMR" : "KidVoz: activa · voz limpia") : "KidVoz: desactivada";
+            UpdateTitle();
             AudioDevice o = _output.SelectedItem as AudioDevice;
             if (o != null)
                 _status.Text = IsVirtual(o)
                     ? "En Discord, OBS o el juego elige como micrófono el otro extremo de \"" + o.Name + "\" (p. ej. CABLE Output)."
-                    : "Sin micrófono virtual: te escuchas en \"" + o.Name + "\". Para que otras apps reciban la voz mejorada, instala un cable virtual (p. ej. VB-CABLE).";
+                    : "Sin micrófono virtual: te escuchas en \"" + o.Name + "\" (usa audífonos). Para que otras apps reciban la voz mejorada, instala un cable virtual (p. ej. VB-CABLE).";
+            _lastActive = DateTime.Now;
             if (!_loading) SaveSettings();
         }
 
         void Tick()
         {
-            _meterIn.Value = Meter(_engine.Dsp.InPeak);
-            _meterOut.Value = Meter(_engine.Dsp.OutPeak);
+            _meterIn.Value = Level(_engine.Dsp.InPeak);
+            _meterOut.Value = Level(_engine.Dsp.OutPeak);
             if (_engine.Error != null && !_engine.Running) _status.Text = "Error de audio: " + _engine.Error;
+            // Like the translator: full opacity while the mouse is over it, fades after 6 s idle
+            if (Bounds.Contains(Cursor.Position) || _input.DroppedDown || _output.DroppedDown) _lastActive = DateTime.Now;
+            double want = (DateTime.Now - _lastActive).TotalSeconds > 6 ? FadedOpacity : ActiveOpacity;
+            if (Math.Abs(Opacity - want) > 0.01) Opacity = want;
         }
 
-        static int Meter(float peak)
+        static float Level(float peak)
         {
             double db = 20 * Math.Log10(peak + 1e-9);
-            return (int)Math.Max(0, Math.Min(100, (db + 60) / 60 * 100));
+            return (float)Math.Max(0, Math.Min(1, (db + 60) / 60));
         }
 
         void SaveSettings()
         {
+            if (_loading) return;
             try
             {
                 AudioDevice i = _input.SelectedItem as AudioDevice, o = _output.SelectedItem as AudioDevice;
                 File.WriteAllLines(_settingsPath, new[]
                 {
                     "on=" + (_toggle.On ? "1" : "0"),
-                    "asmr=" + (_asmr.Checked ? "1" : "0"),
+                    "asmr=" + (_asmrOn ? "1" : "0"),
                     "input=" + (i != null ? i.Id : ""),
-                    "output=" + (o != null ? o.Id : "")
+                    "output=" + (o != null ? o.Id : ""),
+                    "collapsed=" + (_collapsed ? "1" : "0"),
+                    "settings=" + (_showSettings ? "1" : "0"),
+                    "x=" + Left,
+                    "y=" + Top
                 });
             }
             catch { }
+        }
+
+        protected override void OnMove(EventArgs e)
+        {
+            base.OnMove(e);
+            _lastActive = DateTime.Now;
         }
     }
 
