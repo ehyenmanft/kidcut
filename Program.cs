@@ -2295,6 +2295,13 @@ namespace KidCut
         public static volatile bool IsRecording;
         public static string LastOutput;
         public static string LastError;
+        // Voice enhancement + noise suppression on the mic track; applied in the background finish pass, so it costs
+        // nothing while recording and can be toggled until the take is stopped
+        public static volatile bool EnhanceVoice = true;
+        // Rumble cut, FFT denoiser for steady hiss, gate for background between phrases, less boom, more presence,
+        // even level, no clipping
+        private const string VoiceFilter = "highpass=f=80,afftdn=nr=12:nf=-40:tn=1,agate=threshold=0.025:ratio=4:range=0.1:attack=5:release=300," +
+            "equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1.2:g=3,acompressor=threshold=-24dB:ratio=3:attack=5:release=150:makeup=2,alimiter=limit=0.9";
 
         // Takes still being compressed in the background (a new take can start meanwhile)
         private static int _pending;
@@ -2624,6 +2631,7 @@ namespace KidCut
             public List<string> Segments { get; set; }
             public List<string> AudioPaths { get; set; }
             public List<long> AudioStartUs { get; set; }
+            public bool VoiceFx { get; set; }
         }
 
         private static string ManifestPath(string stamp)
@@ -2640,7 +2648,8 @@ namespace KidCut
                 Fps = take.Fps,
                 Segments = new List<string>(take.Segments),
                 AudioPaths = new List<string>(),
-                AudioStartUs = new List<long>()
+                AudioStartUs = new List<long>(),
+                VoiceFx = EnhanceVoice
             };
             foreach (WasapiCapture a in new[] { take.Sys, take.Mic })
             {
@@ -2743,21 +2752,33 @@ namespace KidCut
                     else if (lead < 0) args.AppendFormat(CultureInfo.InvariantCulture, "-itsoffset {0:0.000} ", -lead);
                     args.AppendFormat("-i \"{0}\" ", take.AudioPaths[a]);
                 }
+                // Stream labels per audio input; the mic goes through the voice filter (split once for mix + its own track)
+                string[] mixIn = new string[audio.Count], track = new string[audio.Count];
+                for (int k = 0; k < audio.Count; k++)
+                {
+                    mixIn[k] = string.Format("[{0}:a]", n + k);
+                    track[k] = (n + k) + ":a";
+                    if (!take.VoiceFx || !take.AudioPaths[audio[k]].EndsWith("_mic.wav", StringComparison.OrdinalIgnoreCase)) continue;
+                    graph.AppendFormat(";{0}{1},asplit=2[vm][vt]", mixIn[k], VoiceFilter);
+                    mixIn[k] = "[vm]";
+                    track[k] = "[vt]";
+                    if (audio.Count == 1) graph.Append(";[vm]anullsink");
+                }
                 if (audio.Count == 2)
                 {
                     // Track 1 = mix for any player; tracks 2/3 = separate channels the editor imports independently
-                    graph.AppendFormat(";[{0}:a][{1}:a]amix=inputs=2:normalize=0[mix]", n, n + 1);
+                    graph.AppendFormat(";{0}{1}amix=inputs=2:normalize=0[mix]", mixIn[0], mixIn[1]);
                 }
                 args.AppendFormat("-filter_complex \"{0}\" -map \"[vout]\" ", graph);
                 if (audio.Count == 2)
                 {
-                    args.AppendFormat("-map \"[mix]\" -map {0}:a -map {1}:a ", n, n + 1);
+                    args.AppendFormat("-map \"[mix]\" -map \"{0}\" -map \"{1}\" ", track[0], track[1]);
                     args.Append("-metadata:s:a:0 title=Mezcla -metadata:s:a:1 title=Sistema -metadata:s:a:2 title=Microfono ");
                     args.Append("-disposition:a:0 default -disposition:a:1 0 -disposition:a:2 0 ");
                 }
                 else if (audio.Count == 1)
                 {
-                    args.AppendFormat("-map {0}:a ", n);
+                    args.AppendFormat("-map \"{0}\" ", track[0]);
                 }
                 // Final compression (veryfast CRF 20 ~ 1/3 the size of the live file at the same visual quality)
                 args.AppendFormat(CultureInfo.InvariantCulture,
@@ -4833,6 +4854,7 @@ namespace KidCut
         private readonly Button _btnRec;
         private readonly Button _btnSys;
         private readonly Button _btnMic;
+        private readonly Button _btnVoice;
         private readonly Button _btnCam;
         private readonly Button _btnFps;
         private readonly Button _btnList;
@@ -4860,7 +4882,7 @@ namespace KidCut
             TopMost = true;
             ShowInTaskbar = false;
             BackColor = Color.FromArgb(14, 10, 28);
-            Size = new Size(616, 44);
+            Size = new Size(654, 44);
             Opacity = 0.95;
             StartPosition = FormStartPosition.Manual;
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -4903,13 +4925,14 @@ namespace KidCut
             AddButton("📷", "Captura de pantalla (PNG sin pérdida)", 208, 40, TakeShot);
             _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 250, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
             _btnMic = AddButton("🎙", "Grabar el micrófono", 292, 40, () => { _micOn = !_micOn; RefreshToggles(); });
-            _btnCam = AddButton("📹", "Buscando cámara...", 334, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
-            _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 376, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
-            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 414, 36, CameraStyleForm.ShowDesigner);
-            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 452, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
-            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 490, 40, ShowRecordingsMenu);
-            AddButton("✂", "Abrir el editor KidCut", 532, 40, () => Program.OpenInBrowser(Program.TargetUrl));
-            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 574, 40, Hide);
+            _btnVoice = AddButton("✨", "Mejorar la voz: suprime el ruido de fondo y el zumbido y empareja el volumen del micrófono. Se aplica al guardar, sin cargar la PC mientras grabas.", 334, 36, () => { ScreenRecorder.EnhanceVoice = !ScreenRecorder.EnhanceVoice; RefreshToggles(); });
+            _btnCam = AddButton("📹", "Buscando cámara...", 372, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
+            _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 414, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
+            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 452, 36, CameraStyleForm.ShowDesigner);
+            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 490, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
+            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 528, 40, ShowRecordingsMenu);
+            AddButton("✂", "Abrir el editor KidCut", 570, 40, () => Program.OpenInBrowser(Program.TargetUrl));
+            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 612, 40, Hide);
             RefreshToggles();
 
             // Probing DirectShow takes ~1 s, so the camera button enables itself once a webcam is found
@@ -4965,6 +4988,7 @@ namespace KidCut
         {
             _btnSys.BackColor = _sysOn ? OnColor : OffColor;
             _btnMic.BackColor = _micOn ? OnColor : OffColor;
+            _btnVoice.BackColor = ScreenRecorder.EnhanceVoice ? OnColor : OffColor;
             _btnSys.Text = _sysOn ? "🔊" : "🔇";
             _btnCam.BackColor = _camOn ? OnColor : OffColor;
             _btnShow.BackColor = _showOn ? OnColor : OffColor;
