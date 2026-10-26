@@ -2298,10 +2298,197 @@ namespace KidCut
         // Voice enhancement + noise suppression on the mic track; applied in the background finish pass, so it costs
         // nothing while recording and can be toggled until the take is stopped
         public static volatile bool EnhanceVoice = true;
-        // Rumble cut, FFT denoiser for steady hiss, gate for background between phrases, less boom, more presence,
-        // even level, no clipping
-        private const string VoiceFilter = "highpass=f=80,afftdn=nr=12:nf=-40:tn=1,agate=threshold=0.025:ratio=4:range=0.1:attack=5:release=300," +
-            "equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1.2:g=3,acompressor=threshold=-24dB:ratio=3:attack=5:release=150:makeup=2,alimiter=limit=0.9";
+        // Voice chain tuned per take from the mic WAV itself: notches for steady electrical whine (no denoiser removes
+        // it, and a gate makes it pulse with the voice), rumble/hiss cut, FFT denoiser for room noise, gain so the voice
+        // sits above the game, gate halfway between room noise and voice, gentle compression, limiter without auto-gain
+        private static string VoiceFilter(string wavPath)
+        {
+            List<double> tones;
+            double noiseDb, voiceDb;
+            if (!AnalyzeMic(wavPath, out tones, out noiseDb, out voiceDb))
+            {
+                tones = new List<double>();
+                noiseDb = -60;
+                voiceDb = -30;
+            }
+            bool speech = voiceDb - noiseDb >= 6; // otherwise the take has no voice: no gain, gate stays mostly closed
+            double gain = speech ? Math.Max(0, Math.Min(20, -14 - voiceDb)) : 0;
+            double gateDb = (speech ? (noiseDb + voiceDb) / 2 : voiceDb + 3) + gain;
+            Log(string.Format(CultureInfo.InvariantCulture, "Voice: noise {0:0} dB, voice {1:0} dB, gain {2:0.0} dB, gate {3:0} dB, tones [{4}]",
+                noiseDb, voiceDb, gain, gateDb, string.Join(" ", tones.Select(t => t.ToString("0", CultureInfo.InvariantCulture)))));
+            StringBuilder f = new StringBuilder("highpass=f=90");
+            foreach (double hz in tones) f.AppendFormat(CultureInfo.InvariantCulture, ",bandreject=f={0:0}:width_type=q:w=25", hz);
+            f.AppendFormat(CultureInfo.InvariantCulture,
+                ",lowpass=f=12000,afftdn=nr=18:nf={0:0}:tn=1,volume={1:0.0}dB,agate=threshold={2:0.0000}:ratio=3:range=0.06:attack=5:release=400:detection=rms," +
+                "equalizer=f=3000:t=q:w=1:g=2,acompressor=threshold=-20dB:ratio=2.5:attack=10:release=200,alimiter=limit=0.89:level=0",
+                Math.Max(-80, Math.Min(-20, noiseDb)), gain, Math.Max(0.001, Math.Min(0.5, Math.Pow(10, gateDb / 20))));
+            return f.ToString();
+        }
+
+        // Room noise (20th percentile of 50 ms levels), voice (95th) and steady tones (bins whose 20th percentile over
+        // time still stands 12 dB above their neighbours: whine never stops, voice and music do)
+        // shortcut: only the first 3 min are analysed; enough for whine and levels unless the voice starts much later
+        private static bool AnalyzeMic(string path, out List<double> tones, out double noiseDb, out double voiceDb)
+        {
+            tones = new List<double>();
+            noiseDb = voiceDb = 0;
+            try
+            {
+                float[] x;
+                int rate;
+                if (!ReadWavMono(path, 180, out x, out rate) || x.Length < rate * 2) return false;
+                int w = rate / 20;
+                List<double> levels = new List<double>();
+                for (int i = 0; i + w <= x.Length; i += w)
+                {
+                    double s = 0;
+                    for (int j = i; j < i + w; j++) s += x[j] * x[j];
+                    levels.Add(10 * Math.Log10(s / w + 1e-12));
+                }
+                levels.Sort();
+                noiseDb = levels[(int)(levels.Count * 0.2)];
+                voiceDb = levels[(int)(levels.Count * 0.95)];
+
+                const int N = 8192;
+                int frames = x.Length / N, bins = N / 2;
+                float[][] mag = new float[bins][];
+                for (int b = 0; b < bins; b++) mag[b] = new float[frames];
+                double[] re = new double[N], im = new double[N];
+                for (int fr = 0; fr < frames; fr++)
+                {
+                    for (int i = 0; i < N; i++)
+                    {
+                        re[i] = x[fr * N + i] * (0.5 - 0.5 * Math.Cos(2 * Math.PI * i / (N - 1)));
+                        im[i] = 0;
+                    }
+                    Fft(re, im);
+                    for (int b = 0; b < bins; b++) mag[b][fr] = (float)Math.Sqrt(re[b] * re[b] + im[b] * im[b]);
+                }
+                double[] p = new double[bins];
+                for (int b = 0; b < bins; b++)
+                {
+                    Array.Sort(mag[b]);
+                    p[b] = 20 * Math.Log10(mag[b][frames / 5] + 1e-12);
+                }
+                double bw = (double)rate / N;
+                List<KeyValuePair<double, double>> found = new List<KeyValuePair<double, double>>();
+                double[] around = new double[81];
+                for (int b = (int)(1000 / bw); b < Math.Min(bins - 41, (int)(16000 / bw)); b++)
+                {
+                    if (p[b] < p[b - 2] || p[b] < p[b - 1] || p[b] < p[b + 1] || p[b] < p[b + 2]) continue;
+                    Array.Copy(p, b - 40, around, 0, 81);
+                    Array.Sort(around);
+                    if (p[b] - around[40] > 12) found.Add(new KeyValuePair<double, double>(p[b] - around[40], b * bw));
+                }
+                tones = found.OrderByDescending(t => t.Key).Take(6).Select(t => t.Value).ToList();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("Mic analysis failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        // 32-bit float (what WASAPI shared mode gives) or 16-bit PCM WAV, channels averaged, up to maxSeconds
+        private static bool ReadWavMono(string path, int maxSeconds, out float[] samples, out int rate)
+        {
+            samples = null;
+            rate = 0;
+            using (BinaryReader r = new BinaryReader(File.OpenRead(path)))
+            {
+                Stream s = r.BaseStream;
+                if (Encoding.ASCII.GetString(r.ReadBytes(4)) != "RIFF") return false;
+                r.ReadUInt32();
+                if (Encoding.ASCII.GetString(r.ReadBytes(4)) != "WAVE") return false;
+                int channels = 0, bits = 0, tag = 0;
+                while (s.Position + 8 <= s.Length)
+                {
+                    string id = Encoding.ASCII.GetString(r.ReadBytes(4));
+                    long size = r.ReadUInt32();
+                    long next = s.Position + size + (size & 1);
+                    if (id == "fmt ")
+                    {
+                        tag = r.ReadUInt16();
+                        channels = r.ReadUInt16();
+                        rate = r.ReadInt32();
+                        r.ReadInt32();
+                        r.ReadUInt16();
+                        bits = r.ReadUInt16();
+                        if (tag == 0xFFFE && size >= 40)
+                        {
+                            r.ReadBytes(8);
+                            tag = r.ReadUInt16(); // sub-format GUID starts with the plain format tag
+                        }
+                    }
+                    else if (id == "data")
+                    {
+                        bool isFloat = tag == 3 && bits == 32, isPcm = tag == 1 && bits == 16;
+                        if (channels == 0 || rate <= 0 || !(isFloat || isPcm)) return false;
+                        int frameBytes = channels * bits / 8;
+                        // The header size may be stale on a take that was never finalised: trust the file length then
+                        long avail = s.Length - s.Position;
+                        if (size > 0 && size < avail) avail = size;
+                        int total = (int)Math.Min(avail / frameBytes, (long)maxSeconds * rate);
+                        samples = new float[total];
+                        byte[] buf = new byte[rate * frameBytes];
+                        for (int done = 0; done < total;)
+                        {
+                            int want = Math.Min(rate, total - done), got = s.Read(buf, 0, want * frameBytes) / frameBytes;
+                            if (got == 0) break;
+                            for (int i = 0; i < got; i++)
+                            {
+                                float sum = 0;
+                                for (int c = 0; c < channels; c++)
+                                {
+                                    int o = i * frameBytes + c * bits / 8;
+                                    sum += isFloat ? BitConverter.ToSingle(buf, o) : BitConverter.ToInt16(buf, o) / 32768f;
+                                }
+                                samples[done + i] = sum / channels;
+                            }
+                            done += got;
+                        }
+                        return true;
+                    }
+                    s.Position = next;
+                }
+                return false;
+            }
+        }
+
+        private static void Fft(double[] re, double[] im)
+        {
+            int n = re.Length;
+            for (int i = 1, j = 0; i < n; i++)
+            {
+                int bit = n >> 1;
+                for (; (j & bit) != 0; bit >>= 1) j ^= bit;
+                j ^= bit;
+                if (i < j)
+                {
+                    double t = re[i]; re[i] = re[j]; re[j] = t;
+                    t = im[i]; im[i] = im[j]; im[j] = t;
+                }
+            }
+            for (int len = 2; len <= n; len <<= 1)
+            {
+                double ang = -2 * Math.PI / len, wr = Math.Cos(ang), wi = Math.Sin(ang);
+                for (int i = 0; i < n; i += len)
+                {
+                    double cr = 1, ci = 0;
+                    for (int k = 0; k < len / 2; k++)
+                    {
+                        int a = i + k, b = a + len / 2;
+                        double xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr;
+                        re[b] = re[a] - xr; im[b] = im[a] - xi;
+                        re[a] += xr; im[a] += xi;
+                        double t = cr * wr - ci * wi;
+                        ci = cr * wi + ci * wr;
+                        cr = t;
+                    }
+                }
+            }
+        }
 
         // Takes still being compressed in the background (a new take can start meanwhile)
         private static int _pending;
@@ -2759,7 +2946,7 @@ namespace KidCut
                     mixIn[k] = string.Format("[{0}:a]", n + k);
                     track[k] = (n + k) + ":a";
                     if (!take.VoiceFx || !take.AudioPaths[audio[k]].EndsWith("_mic.wav", StringComparison.OrdinalIgnoreCase)) continue;
-                    graph.AppendFormat(";{0}{1},asplit=2[vm][vt]", mixIn[k], VoiceFilter);
+                    graph.AppendFormat(";{0}{1},asplit=2[vm][vt]", mixIn[k], VoiceFilter(take.AudioPaths[audio[k]]));
                     mixIn[k] = "[vm]";
                     track[k] = "[vt]";
                     if (audio.Count == 1) graph.Append(";[vm]anullsink");
@@ -2769,7 +2956,8 @@ namespace KidCut
                     // Track 1 = mix for any player; tracks 2/3 = separate channels the editor imports independently
                     // Both inputs upmixed to stereo first: amix negotiates one layout for all of them and, depending on
                     // input offsets, picks the mic's mono and folds the game down with it
-                    graph.AppendFormat(";{0}aformat=channel_layouts=stereo[mx0];{1}aformat=channel_layouts=stereo[mx1];[mx0][mx1]amix=inputs=2:normalize=0[mix]",
+                    // The game keeps its own level; the limiter only catches peaks where game and voice add up (no auto-gain)
+                    graph.AppendFormat(";{0}aformat=channel_layouts=stereo[mx0];{1}aformat=channel_layouts=stereo[mx1];[mx0][mx1]amix=inputs=2:normalize=0,alimiter=limit=0.95:level=0[mix]",
                         mixIn[0], mixIn[1]);
                 }
                 args.AppendFormat("-filter_complex \"{0}\" -map \"[vout]\" ", graph);
@@ -4928,7 +5116,7 @@ namespace KidCut
             AddButton("📷", "Captura de pantalla (PNG sin pérdida)", 208, 40, TakeShot);
             _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 250, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
             _btnMic = AddButton("🎙", "Grabar el micrófono", 292, 40, () => { _micOn = !_micOn; RefreshToggles(); });
-            _btnVoice = AddButton("✨", "Mejorar la voz: suprime el ruido de fondo y el zumbido y empareja el volumen del micrófono. Se aplica al guardar, sin cargar la PC mientras grabas.", 334, 36, () => { ScreenRecorder.EnhanceVoice = !ScreenRecorder.EnhanceVoice; RefreshToggles(); });
+            _btnVoice = AddButton("✨", "Mejorar la voz: quita pitidos y zumbidos constantes y el ruido del ambiente, y sube tu voz por encima del juego sin bajar el juego. Se aplica al guardar, sin cargar la PC mientras grabas.", 334, 36, () => { ScreenRecorder.EnhanceVoice = !ScreenRecorder.EnhanceVoice; RefreshToggles(); });
             _btnCam = AddButton("📹", "Buscando cámara...", 372, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
             _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 414, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
             _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 452, 36, CameraStyleForm.ShowDesigner);
