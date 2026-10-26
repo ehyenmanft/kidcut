@@ -2312,7 +2312,7 @@ namespace KidCut
                 voiceDb = -30;
             }
             bool speech = voiceDb - noiseDb >= 6; // otherwise the take has no voice: no gain, gate stays mostly closed
-            double gain = speech ? Math.Max(0, Math.Min(20, -14 - voiceDb)) : 0;
+            double gain = speech ? Math.Max(0, Math.Min(23, -11 - voiceDb)) : 0;
             double gateDb = (speech ? (noiseDb + voiceDb) / 2 : voiceDb + 3) + gain;
             Log(string.Format(CultureInfo.InvariantCulture, "Voice: noise {0:0} dB, voice {1:0} dB, gain {2:0.0} dB, gate {3:0} dB, tones [{4}]",
                 noiseDb, voiceDb, gain, gateDb, string.Join(" ", tones.Select(t => t.ToString("0", CultureInfo.InvariantCulture)))));
@@ -2320,7 +2320,7 @@ namespace KidCut
             foreach (double hz in tones) f.AppendFormat(CultureInfo.InvariantCulture, ",bandreject=f={0:0}:width_type=q:w=25", hz);
             f.AppendFormat(CultureInfo.InvariantCulture,
                 ",lowpass=f=12000,afftdn=nr=18:nf={0:0}:tn=1,volume={1:0.0}dB,agate=threshold={2:0.0000}:ratio=3:range=0.06:attack=5:release=400:detection=rms," +
-                "equalizer=f=3000:t=q:w=1:g=2,acompressor=threshold=-20dB:ratio=2.5:attack=10:release=200,alimiter=limit=0.89:level=0",
+                "equalizer=f=3000:t=q:w=1:g=2,acompressor=threshold=-15dB:ratio=2.5:attack=10:release=200,alimiter=limit=0.89:level=0",
                 Math.Max(-80, Math.Min(-20, noiseDb)), gain, Math.Max(0.001, Math.Min(0.5, Math.Pow(10, gateDb / 20))));
             return f.ToString();
         }
