@@ -2767,7 +2767,8 @@ namespace KidCut
                 if (audio.Count == 2)
                 {
                     // Track 1 = mix for any player; tracks 2/3 = separate channels the editor imports independently
-                    graph.AppendFormat(";{0}{1}amix=inputs=2:normalize=0[mix]", mixIn[0], mixIn[1]);
+                    // Stereo forced: with the filtered mono mic, format negotiation would otherwise fold the game to mono
+                    graph.AppendFormat(";{0}{1}amix=inputs=2:normalize=0,aformat=channel_layouts=stereo[mix]", mixIn[0], mixIn[1]);
                 }
                 args.AppendFormat("-filter_complex \"{0}\" -map \"[vout]\" ", graph);
                 if (audio.Count == 2)
