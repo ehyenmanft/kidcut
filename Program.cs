@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -1911,6 +1912,111 @@ namespace KidCut
             _path = path;
         }
 
+        // KidNoez (the live voice enhancer) shares its processed voice in this named memory: mono float ring plus the
+        // wall-clock time of its newest sample. Recording from it needs no virtual audio driver.
+        private const string KidNoezVoice = "KidNoez.Voice";
+        private bool _fromKidNoez;
+        public bool FromKidNoez { get { return _fromKidNoez; } }
+
+        public static WasapiCapture KidNoezVoiceCapture(string path)
+        {
+            return new WasapiCapture(false, path) { _fromKidNoez = true };
+        }
+
+        // KidNoez is running and its voice is fresh (written within the last second)
+        public static bool KidNoezActive()
+        {
+            try
+            {
+                using (MemoryMappedFile mmf = MemoryMappedFile.OpenExisting(KidNoezVoice))
+                using (MemoryMappedViewAccessor v = mmf.CreateViewAccessor(0, 64))
+                {
+                    long frames, endUs;
+                    return ReadKidNoezHead(v, out frames, out endUs) && frames > 0 && NowUs() - endUs < 1000000;
+                }
+            }
+            catch { return false; }
+        }
+
+        // Header: [0] frames written, [8] wall µs at the end of the newest frame, [24] sequence (odd while writing)
+        private static bool ReadKidNoezHead(MemoryMappedViewAccessor v, out long frames, out long endUs)
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                long s1 = v.ReadInt64(24);
+                frames = v.ReadInt64(0);
+                endUs = v.ReadInt64(8);
+                if ((s1 & 1) == 0 && v.ReadInt64(24) == s1) return true;
+                Thread.Sleep(0);
+            }
+            frames = endUs = 0;
+            return false;
+        }
+
+        // Same WAV as a microphone take (mono float), filled from KidNoez's ring and placed by its timestamps: a stall
+        // or a KidNoez restart becomes silence at the right spot instead of shifting the voice
+        private void RunKidNoez()
+        {
+            Thread.CurrentThread.Priority = ThreadPriority.Highest;
+            try
+            {
+                using (MemoryMappedFile mmf = MemoryMappedFile.OpenExisting(KidNoezVoice))
+                using (MemoryMappedViewAccessor v = mmf.CreateViewAccessor())
+                using (FileStream fs = new FileStream(_path, FileMode.Create, FileAccess.Write, FileShare.Read))
+                {
+                    SampleRate = v.ReadInt32(16);
+                    int cap = v.ReadInt32(20);
+                    byte[] fmt = new byte[18];
+                    BitConverter.GetBytes((short)3).CopyTo(fmt, 0);                  // WAVE_FORMAT_IEEE_FLOAT
+                    BitConverter.GetBytes((short)1).CopyTo(fmt, 2);
+                    BitConverter.GetBytes(SampleRate).CopyTo(fmt, 4);
+                    BitConverter.GetBytes(SampleRate * 4).CopyTo(fmt, 8);
+                    BitConverter.GetBytes((short)4).CopyTo(fmt, 12);
+                    BitConverter.GetBytes((short)32).CopyTo(fmt, 14);
+                    WriteWavHeader(fs, fmt, 0);
+
+                    long read, end, endUs;
+                    if (!ReadKidNoezHead(v, out end, out endUs)) throw new InvalidOperationException("KidNoez no responde.");
+                    read = end;
+                    StartUs = endUs;
+                    _ready.Set();
+
+                    float[] chunk = new float[cap];
+                    byte[] bytes = new byte[cap * 4], silence = new byte[SampleRate * 4];
+                    int slack = SampleRate / 50;
+                    while (!_stop)
+                    {
+                        Thread.Sleep(10);
+                        if (!ReadKidNoezHead(v, out end, out endUs)) continue;
+                        if (end < read) read = end;                // KidNoez restarted: its count began again
+                        if (end - read > cap) read = end - cap;    // fell behind a whole ring: keep what is left
+                        int n = (int)(end - read);
+                        if (n <= 0) continue;
+                        long pos = (endUs - StartUs) * SampleRate / 1000000 - n;
+                        if (pos - FramesWritten > slack) WriteSilence(fs, pos - FramesWritten, 4, silence);
+                        int at = (int)(read % cap), first = Math.Min(n, cap - at);
+                        v.ReadArray(64 + at * 4L, chunk, 0, first);
+                        if (first < n) v.ReadArray(64, chunk, first, n - first);
+                        Buffer.BlockCopy(chunk, 0, bytes, 0, n * 4);
+                        fs.Write(bytes, 0, n * 4);
+                        FramesWritten += n;
+                        read = end;
+                    }
+                    long endPos = (NowUs() - StartUs) * SampleRate / 1000000;
+                    if (endPos > FramesWritten) WriteSilence(fs, endPos - FramesWritten, 4, silence);
+                    WriteWavHeader(fs, fmt, FramesWritten * 4);
+                }
+            }
+            catch (Exception ex)
+            {
+                Error = ex.Message;
+            }
+            finally
+            {
+                _ready.Set();
+            }
+        }
+
         public bool Start()
         {
             Begin();
@@ -1951,6 +2057,7 @@ namespace KidCut
 
         private void Run()
         {
+            if (_fromKidNoez) { RunKidNoez(); return; }
             IAudioClient client = null;
             // Real-time audio scheduling (MMCSS "Pro Audio") so a busy CPU never starves the capture into gaps
             Thread.CurrentThread.Priority = ThreadPriority.Highest;
@@ -2571,7 +2678,11 @@ namespace KidCut
                 Take take = new Take { Stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff"), Fps = fps };
                 // Audio starts first; the muxer trims its head so it lines up with the first video frame
                 take.Sys = captureSystem ? new WasapiCapture(true, Path.Combine(Program.ScratchDir, "rec_" + take.Stamp + "_sys.wav")) : null;
-                take.Mic = captureMic ? new WasapiCapture(false, Path.Combine(Program.ScratchDir, "rec_" + take.Stamp + "_mic.wav")) : null;
+                string micPath = Path.Combine(Program.ScratchDir, "rec_" + take.Stamp + "_mic.wav");
+                // With KidNoez running, the voice is taken already enhanced from it instead of the raw microphone
+                bool kidNoez = captureMic && WasapiCapture.KidNoezActive();
+                take.Mic = !captureMic ? null : kidNoez ? WasapiCapture.KidNoezVoiceCapture(micPath) : new WasapiCapture(false, micPath);
+                if (kidNoez) Log("Microphone: KidNoez voice");
                 // Audio and screen start in parallel: sync comes from absolute wall-clock stamps, not from start order
                 Stopwatch timing = Stopwatch.StartNew();
                 if (take.Sys != null) take.Sys.Begin();
@@ -2842,7 +2953,7 @@ namespace KidCut
                 Segments = new List<string>(take.Segments),
                 AudioPaths = new List<string>(),
                 AudioStartUs = new List<long>(),
-                VoiceFx = EnhanceVoice
+                VoiceFx = EnhanceVoice && !(take.Mic != null && take.Mic.FromKidNoez) // KidNoez already enhanced it
             };
             foreach (WasapiCapture a in new[] { take.Sys, take.Mic })
             {
@@ -5058,6 +5169,8 @@ namespace KidCut
         private readonly Button _btnStyle;
         private readonly Button _btnShow;
         private bool _showOn = true;
+        private bool _kidNoezShown;
+        private int _ticks;
         private readonly Label _lblTime;
         private readonly ToolTip _tips = new ToolTip();
         private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
@@ -5289,6 +5402,16 @@ namespace KidCut
 
         private void UpdateState()
         {
+            if (++_ticks % 4 == 0)
+            {
+                bool kn = WasapiCapture.KidNoezActive();
+                if (kn != _kidNoezShown)
+                {
+                    _kidNoezShown = kn;
+                    _btnMic.Text = kn ? "🎙✨" : "🎙";
+                    _tips.SetToolTip(_btnMic, kn ? "Grabar el micrófono: se graba la voz ya mejorada de KidNoez" : "Grabar el micrófono");
+                }
+            }
             bool rec = ScreenRecorder.IsRecording;
             bool busy = _starting;
             _btnRec.Text = rec ? "■ STOP" : "● REC";

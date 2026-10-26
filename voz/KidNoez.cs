@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -44,7 +45,7 @@ namespace KidNoez
             for (int i = 0; i + 480 <= x.Length; i += 480) dsp.Process(x, i, 480);
             Wav.WriteMono16(output, x, rate);
             File.WriteAllText(output + ".txt", "tones: " + string.Join(" ", dsp.Tones.Select(t => t.ToString("0"))) +
-                "\r\ngainDb: " + dsp.GainDb.ToString("0.0") + "\r\n");
+                "\r\ngainDb: " + dsp.GainDb.ToString("0.0") + "\r\nhowls: " + dsp.Howls + (dsp.Howls > 0 ? " last " + dsp.LastHowlHz.ToString("0") + " Hz" : "") + "\r\n");
             return 0;
         }
     }
@@ -101,6 +102,7 @@ namespace KidNoez
     {
         public const int Rate = 48000;
         const int N = 512, Hop = N / 2, Bins = N / 2 + 1;
+        public const int DelaySamples = N; // output sample i is input sample i - N (STFT and bypass alike)
 
         public volatile bool Enabled = true;
         public volatile bool Asmr;
@@ -127,6 +129,14 @@ namespace KidNoez
         readonly double[] _det = new double[DetN], _dre = new double[DetN], _dim = new double[DetN];
         readonly double[] _dps = new double[DetN / 2 + 1], _dnoise = new double[DetN / 2 + 1];
         int _detPos, _detFrames;
+
+        public volatile int Howls;             // feedback events, for the UI
+        public double LastHowlHz;
+        readonly double[] _pw = new double[Bins], _sorted = new double[236];
+        readonly List<double> _howlHz = new List<double>();
+        Biquad[] _howlNotches = new Biquad[0];
+        int _howlBin, _howlRun;
+        double _duck = 1;
 
         // _speechDb starts at the target: no boost until real speech has been heard
         double _env = 1e-6, _floorDb = -60, _gate = 1, _speechDb = -18, _comp = 0, _lim = 1;
@@ -157,7 +167,9 @@ namespace KidNoez
                 _rawOut[_hopPos] = _rawDelay[_hopPos];
                 _rawDelay[_hopPos] = x;
                 if (++_hopPos == Hop) { _hopPos = 0; Frame(asmr); }
-                float o = on ? (float)Post(clean, asmr) : (float)raw;
+                // The feedback duck also covers bypass: the raw mic into speakers can howl too
+                _duck += (1 - _duck) / (1500 * Rate / 1000.0);
+                float o = (float)((on ? Post(clean, asmr) : raw) * _duck);
                 buf[i] = o;
                 outPeak = Math.Max(outPeak, Math.Abs(o));
             }
@@ -178,6 +190,7 @@ namespace KidNoez
             for (int k = 0; k < Bins; k++)
             {
                 double p = _re[k] * _re[k] + _im[k] * _im[k];
+                _pw[k] = p;
                 _ps[k] = _frames == 0 ? p : 0.7 * _ps[k] + 0.3 * p;
                 if (_frames == 0) _noise[k] = p;
                 else if (_ps[k] < _noise[k]) _noise[k] = 0.85 * _noise[k] + 0.15 * _ps[k];
@@ -194,6 +207,37 @@ namespace KidNoez
             Array.Copy(_ola, Hop, _ola, 0, N - Hop);
             Array.Clear(_ola, N - Hop, Hop);
             _frames++;
+            DetectHowl();
+        }
+
+        // Feedback (the mic hearing its own output): a main lobe 15 dB over its +-4..7 neighbours (a sine, not the comb of
+        // voice harmonics) and the whole spectrum, loud (> -40 dBFS, so a faint whine never counts), staying put ~130 ms
+        void DetectHowl()
+        {
+            int kmax = 8; // +-7 neighbours stay in range
+            for (int k = 8; k < 240; k++) if (_pw[k] > _pw[kmax]) kmax = k;
+            double side = 0;
+            for (int d = 4; d <= 7; d++) side = Math.Max(side, Math.Max(_pw[kmax - d], _pw[kmax + d]));
+            Array.Copy(_pw, 4, _sorted, 0, _sorted.Length);
+            Array.Sort(_sorted);
+            const double FullScale = 26600; // |X|^2 of a 0 dBFS sine through the 512-point sqrt-Hann window
+            double main = _pw[kmax] + Math.Max(_pw[kmax - 1], _pw[kmax + 1]); // main lobe: a tone between two bins splits
+            bool tonal = main > 31.6 * side && _pw[kmax] > 1000 * _sorted[_sorted.Length / 2] && _pw[kmax] > FullScale * 1e-4;
+            if (tonal && Math.Abs(kmax - _howlBin) <= 1) _howlRun++;
+            else { _howlRun = tonal ? 1 : 0; _howlBin = kmax; }
+            if (_howlRun < 25) return;
+            _howlRun = 0;
+            double hz = (double)kmax * Rate / N;
+            Howls++;
+            LastHowlHz = hz;
+            // Break the loop at once (-30 dB, recovers in ~1.5 s), lower the automatic gain and keep a notch there
+            _duck = 0.03;
+            GainDb = Math.Max(0, GainDb - 6);
+            if (_howlNotches.Length < 8 && _howlHz.All(f => Math.Abs(f - hz) > 60))
+            {
+                _howlHz.Add(hz);
+                _howlNotches = _howlNotches.Concat(new[] { Biquad.Make("notch", hz, 8, 0) }).ToArray();
+            }
         }
 
         // Whine detector on its own 4096-point FFT (12 Hz bins): at the suppressor's 94 Hz bins a whine barely clears
@@ -250,6 +294,7 @@ namespace KidNoez
             const double ms = Rate / 1000.0;
             // Notches go after the STFT: the detector must keep seeing the whine it removes, or it would drop the notch
             foreach (Biquad n in _notches) x = n.Run(x);
+            foreach (Biquad n in _howlNotches) x = n.Run(x);
             x = asmr ? _air.Run(_warm.Run(x)) : _lp.Run(_presence.Run(x));
             double a = x * x;
             _env += (a - _env) / (10 * ms);
@@ -464,8 +509,54 @@ namespace KidNoez
         void ReleaseBuffer(int frames, int flags);
     }
 
+    static class Clock
+    {
+        // Same clock as KidCut's tracks: µs since the Unix epoch
+        public static long NowUs() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).Ticks / 10; }
+        public static long Qpc100ns() { return (long)(System.Diagnostics.Stopwatch.GetTimestamp() * (10000000.0 / System.Diagnostics.Stopwatch.Frequency)); }
+    }
+
+    /// <summary>
+    /// Shares the processed voice with KidCut through named shared memory, so KidCut records it without any virtual
+    /// audio driver. Ring of mono 48 kHz floats; header: [0] frames written, [8] wall µs at the end of the newest frame,
+    /// [16] rate, [20] capacity, [24] sequence (odd while writing). Data starts at 64.
+    /// </summary>
+    class VoiceShare
+    {
+        public const string Name = "KidNoez.Voice";
+        const int Capacity = VoiceDsp.Rate * 8;
+        readonly MemoryMappedFile _mmf;
+        readonly MemoryMappedViewAccessor _view;
+        long _written, _seq;
+
+        public VoiceShare()
+        {
+            _mmf = MemoryMappedFile.CreateOrOpen(Name, 64 + Capacity * 4L);
+            _view = _mmf.CreateViewAccessor();
+            _view.Write(16, VoiceDsp.Rate);
+            _view.Write(20, Capacity);
+            _seq = _view.ReadInt64(24) | 1;
+            _view.Write(24, _seq);
+            _view.Write(0, 0L);
+            _view.Write(24, ++_seq);
+        }
+
+        public void Write(float[] block, int n, long endUs)
+        {
+            int pos = (int)(_written % Capacity), first = Math.Min(n, Capacity - pos);
+            _view.WriteArray(64 + pos * 4L, block, 0, first);
+            if (first < n) _view.WriteArray(64, block, first, n - first);
+            _written += n;
+            _view.Write(24, ++_seq);
+            _view.Write(0, _written);
+            _view.Write(8, endUs);
+            _view.Write(24, ++_seq);
+        }
+    }
+
     class AudioDevice
     {
+        public static readonly AudioDevice None = new AudioDevice { Id = "", Name = "Ninguna · solo KidCut (sin reproducir)" };
         public string Id, Name;
         public override string ToString() { return Name; }
 
@@ -529,6 +620,8 @@ namespace KidNoez
 
         public bool Running { get { return _thread != null && _thread.IsAlive; } }
 
+        VoiceShare _share; // kept across restarts so KidCut never sees the stream vanish when devices change
+
         public void Start(string inputId, string outputId)
         {
             Stop();
@@ -581,23 +674,29 @@ namespace KidNoez
                 const int AutoConvert = unchecked((int)0x80000000) | 0x08000000; // AUTOCONVERTPCM | SRC_DEFAULT_QUALITY
                 cap = Open(inputId);
                 cap.Initialize(0, AutoConvert, 200000, 0, fmtIn, IntPtr.Zero);   // 20 ms
-                ren = Open(outputId);
-                ren.Initialize(0, AutoConvert, 600000, 0, fmtOut, IntPtr.Zero);  // 60 ms
                 Guid iidCap = typeof(IAudioCaptureClient).GUID, iidRen = typeof(IAudioRenderClient).GUID;
                 object o;
                 cap.GetService(ref iidCap, out o);
                 IAudioCaptureClient capture = (IAudioCaptureClient)o;
-                ren.GetService(ref iidRen, out o);
-                IAudioRenderClient render = (IAudioRenderClient)o;
-                int renFrames;
-                ren.GetBufferSize(out renFrames);
+                // No output ("solo KidCut"): nothing is played, so nothing can feed back; the voice still goes to KidCut
+                IAudioRenderClient render = null;
+                int renFrames = 0;
+                if (!string.IsNullOrEmpty(outputId))
+                {
+                    ren = Open(outputId);
+                    ren.Initialize(0, AutoConvert, 600000, 0, fmtOut, IntPtr.Zero);  // 60 ms
+                    ren.GetService(ref iidRen, out o);
+                    render = (IAudioRenderClient)o;
+                    ren.GetBufferSize(out renFrames);
+                }
+                if (_share == null) _share = new VoiceShare();
 
                 float[] fifo = new float[VoiceDsp.Rate];   // 1 s ring
                 int head = 0, count = 0;
                 float[] block = new float[VoiceDsp.Rate / 10];
                 int target = Math.Min(renFrames - 1, VoiceDsp.Rate * 30 / 1000); // keep ~30 ms queued in the output
                 cap.Start();
-                ren.Start();
+                if (ren != null) ren.Start();
                 while (!_stop)
                 {
                     Thread.Sleep(3);
@@ -614,6 +713,11 @@ namespace KidNoez
                         else Marshal.Copy(data, block, 0, frames);
                         capture.ReleaseBuffer(frames);
                         Dsp.Process(block, 0, frames);
+                        // Wall-clock time of this block's first output sample: its capture instant (QPC) minus the
+                        // DSP's fixed delay, so KidCut can line the voice up with the video like any other track
+                        long firstUs = qp > 0 ? Clock.NowUs() - (Clock.Qpc100ns() - qp) / 10 : Clock.NowUs() - frames * 1000000L / VoiceDsp.Rate;
+                        firstUs -= VoiceDsp.DelaySamples * 1000000L / VoiceDsp.Rate;
+                        _share.Write(block, frames, firstUs + frames * 1000000L / VoiceDsp.Rate);
                         for (int i = 0; i < frames; i++)
                         {
                             fifo[(head + count) % fifo.Length] = block[i];
@@ -628,6 +732,7 @@ namespace KidNoez
                         head = (head + drop) % fifo.Length;
                         count -= drop;
                     }
+                    if (render == null) { count = 0; continue; }
                     int padding;
                     ren.GetCurrentPadding(out padding);
                     int n = Math.Min(count, target - padding);
@@ -646,7 +751,7 @@ namespace KidNoez
                     render.ReleaseBuffer(n, 0);
                 }
                 cap.Stop();
-                ren.Stop();
+                if (ren != null) ren.Stop();
             }
             catch (Exception ex)
             {
@@ -758,7 +863,9 @@ namespace KidNoez
         readonly Icon _iconOn = TrayIcon(true), _iconOff = TrayIcon(false);
         readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 60 };
         readonly string _settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "KidNoez.ini");
-        bool _loading, _collapsed, _showSettings, _asmrOn, _quitting;
+        bool _loading, _collapsed, _showSettings, _asmrOn, _quitting, _howlWarned;
+        int _seenHowls;
+        DateTime _howlUntil = DateTime.MinValue;
         DateTime _lastActive = DateTime.Now;
 
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
@@ -967,8 +1074,13 @@ namespace KidNoez
             try
             {
                 Fill(_input, AudioDevice.List(1), st.TryGetValue("input", out v) ? v : AudioDevice.DefaultId(1), null);
-                // A virtual cable is the natural destination: other apps then take its other end as their microphone
-                Fill(_output, AudioDevice.List(0), st.TryGetValue("output", out v) ? v : null, AudioDevice.DefaultId(0));
+                // A virtual cable is the natural destination (other apps take its other end as their microphone);
+                // without one, nothing is played back: speakers next to the mic howl. Settings from before this
+                // option existed (no "outv") start over so an auto-picked speaker is not kept
+                List<AudioDevice> outs = AudioDevice.List(0);
+                outs.Insert(0, AudioDevice.None);
+                string saved = st.TryGetValue("outv", out v) && v == "2" && st.TryGetValue("output", out v) ? v : null;
+                Fill(_output, outs, saved, AudioDevice.None.Id);
             }
             catch (Exception ex) { _status.Text = "No se pudieron listar los dispositivos: " + ex.Message; }
             _toggle.On = !st.TryGetValue("on", out v) || v == "1";
@@ -1029,9 +1141,11 @@ namespace KidNoez
             UpdateTitle();
             AudioDevice o = _output.SelectedItem as AudioDevice;
             if (o != null)
-                _status.Text = IsVirtual(o)
-                    ? "En Discord, OBS o el juego elige como micrófono el otro extremo de \"" + o.Name + "\" (p. ej. CABLE Output)."
-                    : "Sin micrófono virtual: te escuchas en \"" + o.Name + "\" (usa audífonos). Para que otras apps reciban la voz mejorada, instala un cable virtual (p. ej. VB-CABLE).";
+                _status.Text = o == AudioDevice.None
+                    ? "KidCut graba esta voz mejorada directamente. No se reproduce, así que no hay acoples. Para Discord u OBS hace falta un cable virtual (p. ej. VB-CABLE)."
+                    : IsVirtual(o)
+                    ? "En Discord, OBS o el juego elige como micrófono el otro extremo de \"" + o.Name + "\" (p. ej. CABLE Output). KidCut también graba esta voz."
+                    : "Te escuchas en \"" + o.Name + "\": usa audífonos (con altavoces se acopla; KidNoez lo corta si pasa). KidCut graba esta voz directamente.";
             _lastActive = DateTime.Now;
             if (!_loading) SaveSettings();
         }
@@ -1041,6 +1155,25 @@ namespace KidNoez
             _meterIn.Value = Level(_engine.Dsp.InPeak);
             _meterOut.Value = Level(_engine.Dsp.OutPeak);
             if (_engine.Error != null && !_engine.Running) _status.Text = "Error de audio: " + _engine.Error;
+            int howls = _engine.Dsp.Howls;
+            if (howls != _seenHowls)
+            {
+                _seenHowls = howls;
+                _howlUntil = DateTime.Now.AddSeconds(4);
+                _state.Text = "⚠ Acople: salida bajada";
+                _state.ForeColor = OffC;
+                _lastActive = DateTime.Now;
+                if (!_howlWarned)
+                {
+                    _howlWarned = true;
+                    _tray.ShowBalloonTip(5000, "KidNoez", "Acople detectado: bajé la salida al instante. Usa audífonos, o elige \"Ninguna · solo KidCut\" en ⚙.", ToolTipIcon.Warning);
+                }
+            }
+            else if (_howlUntil != DateTime.MinValue && DateTime.Now > _howlUntil)
+            {
+                _howlUntil = DateTime.MinValue;
+                Apply();
+            }
             // Like the translator: full opacity while the mouse is over it, fades after 6 s idle
             if (Bounds.Contains(Cursor.Position) || _input.DroppedDown || _output.DroppedDown) _lastActive = DateTime.Now;
             double want = (DateTime.Now - _lastActive).TotalSeconds > 6 ? FadedOpacity : ActiveOpacity;
@@ -1065,6 +1198,7 @@ namespace KidNoez
                     "asmr=" + (_asmrOn ? "1" : "0"),
                     "input=" + (i != null ? i.Id : ""),
                     "output=" + (o != null ? o.Id : ""),
+                    "outv=2",
                     "collapsed=" + (_collapsed ? "1" : "0"),
                     "settings=" + (_showSettings ? "1" : "0"),
                     "x=" + Left,
