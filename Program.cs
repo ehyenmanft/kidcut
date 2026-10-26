@@ -2380,7 +2380,13 @@ namespace KidCut
                     Array.Sort(around);
                     if (p[b] - around[40] > 12) found.Add(new KeyValuePair<double, double>(p[b] - around[40], b * bw));
                 }
-                tones = found.OrderByDescending(t => t.Key).Take(6).Select(t => t.Value).ToList();
+                // A whine can show up as a cluster of nearby peaks; one Q-25 notch (>= 270 Hz wide above 6.7 kHz) covers it,
+                // so the six notches go to distinct tones instead of six bins of the same one
+                foreach (KeyValuePair<double, double> t in found.OrderByDescending(t => t.Key))
+                {
+                    if (tones.Count == 6) break;
+                    if (tones.All(hz => Math.Abs(hz - t.Value) > 300)) tones.Add(t.Value);
+                }
                 return true;
             }
             catch (Exception ex)
