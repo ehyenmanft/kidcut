@@ -2713,13 +2713,39 @@ namespace KidCut
             }
         }
 
+        // Area to record in physical pixels of the primary screen; Empty = whole screen. Chosen in the widget before REC.
+        public static Rectangle Region = Rectangle.Empty;
+
+        // Logical (DPI-unaware) rectangle from the picker -> physical pixels, even sizes (x264 4:2:0), inside the screen
+        public static Rectangle ToPhysicalRegion(Rectangle logical)
+        {
+            if (logical.IsEmpty) return Rectangle.Empty;
+            Size phys = PhysicalScreenSize();
+            double k = (double)phys.Width / Screen.PrimaryScreen.Bounds.Width;
+            Rectangle r = Rectangle.Intersect(new Rectangle(
+                (int)Math.Round(logical.X * k), (int)Math.Round(logical.Y * k), (int)Math.Round(logical.Width * k), (int)Math.Round(logical.Height * k)),
+                new Rectangle(Point.Empty, phys));
+            return new Rectangle(r.X & ~1, r.Y & ~1, r.Width & ~1, r.Height & ~1);
+        }
+
         private static string[][] ScreenSources(int fps)
         {
+            // gdigrab captures the whole virtual desktop, whose origin may sit left/above the primary screen
+            Rectangle v = SystemInformation.VirtualScreen, p = Screen.PrimaryScreen.Bounds;
+            double k = (double)PhysicalScreenSize().Width / p.Width;
             return new[]
             {
-                new[] { string.Format("-f lavfi -i ddagrab=output_idx=0:framerate={0}:draw_mouse=1", fps), "hwdownload,format=bgra," },
-                new[] { string.Format("-f gdigrab -framerate {0} -draw_mouse 1 -i desktop", fps), "" }
+                new[] { string.Format("-f lavfi -i ddagrab=output_idx=0:framerate={0}:draw_mouse=1", fps), "hwdownload,format=bgra," + Crop(0, 0) },
+                new[] { string.Format("-f gdigrab -framerate {0} -draw_mouse 1 -i desktop", fps),
+                        Region.IsEmpty ? Crop(0, 0) : Crop((int)Math.Round((p.X - v.X) * k), (int)Math.Round((p.Y - v.Y) * k)) }
             };
+        }
+
+        // gdigrab without a region keeps recording every monitor, as before
+        private static string Crop(int dx, int dy)
+        {
+            Rectangle r = Region;
+            return r.IsEmpty ? "" : string.Format("crop={0}:{1}:{2}:{3},", r.Width, r.Height, r.X + dx, r.Y + dy);
         }
 
         // Starts one capture process writing a new segment; false if it dies right away
@@ -2854,6 +2880,12 @@ namespace KidCut
                 Size scaled = CameraBubble.ScaledSize(style);
                 int camX = (int)Math.Round(frac.X * phys.Width + scaled.Width * k / 2 - cam.Width / 2.0);
                 int camY = (int)Math.Round(frac.Y * phys.Height + scaled.Height * k / 2 - cam.Height / 2.0);
+                if (!Region.IsEmpty)
+                {
+                    // Same spot relative to the recorded area, kept inside it
+                    camX = Math.Max(0, Math.Min(Region.Width - cam.Width, camX - Region.X));
+                    camY = Math.Max(0, Math.Min(Region.Height - cam.Height, camY - Region.Y));
+                }
                 video = string.Format(
                     // Tiny input queue: FFmpeg otherwise reads the pipe ahead into an unbounded queue and frames get
                     // stamped seconds after they were rendered (the camera drifted ~4 s behind in a 30 s take)
@@ -3148,15 +3180,15 @@ namespace KidCut
         {
             Directory.CreateDirectory(RecordingsDir);
             string path = Path.Combine(RecordingsDir, "Captura_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".png");
-            Size size = PhysicalScreenSize();
+            Rectangle area = Region.IsEmpty ? new Rectangle(Point.Empty, PhysicalScreenSize()) : Region;
             IntPtr previous = IntPtr.Zero;
             try { previous = SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { }
             try
             {
-                using (Bitmap bmp = new Bitmap(size.Width, size.Height))
+                using (Bitmap bmp = new Bitmap(area.Width, area.Height))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
-                    g.CopyFromScreen(0, 0, 0, 0, size);
+                    g.CopyFromScreen(area.X, area.Y, 0, 0, area.Size);
                     bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                 }
             }
@@ -5145,6 +5177,73 @@ namespace KidCut
 
     #region Floating Recorder Overlay Widget
 
+    // Dimmed layer over the primary screen: drag a rectangle to choose what gets recorded; a click without dragging
+    // means the whole screen, Esc cancels. The selection is a colour-keyed hole, so it shows the real screen undimmed.
+    public class RegionPicker : Form
+    {
+        private static readonly Color Hole = Color.FromArgb(255, 0, 255);
+        private Point _start;
+        private Rectangle _sel;
+        private bool _drag;
+
+        public Rectangle Selection { get { return _sel; } } // logical pixels relative to the primary screen; Empty = full
+
+        public RegionPicker()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = Screen.PrimaryScreen.Bounds;
+            TopMost = true;
+            ShowInTaskbar = false;
+            BackColor = Color.Black;
+            TransparencyKey = Hole;
+            Opacity = 0.55;
+            DoubleBuffered = true;
+            Cursor = Cursors.Cross;
+            KeyPreview = true;
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            _start = e.Location;
+            _drag = true;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (!_drag) return;
+            _sel = Rectangle.FromLTRB(Math.Min(_start.X, e.X), Math.Min(_start.Y, e.Y), Math.Max(_start.X, e.X), Math.Max(_start.Y, e.Y));
+            Invalidate();
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (!_drag) return;
+            _drag = false;
+            if (_sel.Width < 32 || _sel.Height < 32) _sel = Rectangle.Empty;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Color.Black);
+            string hint = "Arrastra para elegir la zona a grabar  ·  Clic sin arrastrar: pantalla completa  ·  Esc: cancelar";
+            using (Font f = new Font("Segoe UI", 14, FontStyle.Bold))
+            {
+                SizeF hs = g.MeasureString(hint, f);
+                g.DrawString(hint, f, Brushes.White, (Width - hs.Width) / 2, 40);
+                if (_sel.IsEmpty) return;
+                using (SolidBrush hole = new SolidBrush(Hole)) g.FillRectangle(hole, _sel);
+                using (Pen p = new Pen(Color.FromArgb(255, 210, 0), 3)) g.DrawRectangle(p, Rectangle.Inflate(_sel, 2, 2));
+                g.DrawString(string.Format("{0} × {1}", _sel.Width, _sel.Height), f, Brushes.White, _sel.Left, Math.Max(0, _sel.Top - 34));
+            }
+        }
+    }
+
     public class RecorderOverlay : Form
     {
         [DllImport("user32.dll")]
@@ -5166,6 +5265,7 @@ namespace KidCut
         private readonly Button _btnCam;
         private readonly Button _btnFps;
         private readonly Button _btnList;
+        private readonly Button _btnRegion;
         private readonly Button _btnStyle;
         private readonly Button _btnShow;
         private bool _showOn = true;
@@ -5192,7 +5292,7 @@ namespace KidCut
             TopMost = true;
             ShowInTaskbar = false;
             BackColor = Color.FromArgb(14, 10, 28);
-            Size = new Size(654, 44);
+            Size = new Size(692, 44);
             Opacity = 0.95;
             StartPosition = FormStartPosition.Manual;
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -5233,16 +5333,17 @@ namespace KidCut
             _tips.SetToolTip(_lblTime, "Doble clic: abrir carpeta de grabaciones");
 
             AddButton("📷", "Captura de pantalla (PNG sin pérdida)", 208, 40, TakeShot);
-            _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 250, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
-            _btnMic = AddButton("🎙", "Grabar el micrófono", 292, 40, () => { _micOn = !_micOn; RefreshToggles(); });
-            _btnVoice = AddButton("✨", "Mejorar la voz: quita pitidos y zumbidos constantes y el ruido del ambiente, y sube tu voz por encima del juego sin bajar el juego. Se aplica al guardar, sin cargar la PC mientras grabas.", 334, 36, () => { ScreenRecorder.EnhanceVoice = !ScreenRecorder.EnhanceVoice; RefreshToggles(); });
-            _btnCam = AddButton("📹", "Buscando cámara...", 372, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
-            _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 414, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
-            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 452, 36, CameraStyleForm.ShowDesigner);
-            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 490, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
-            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 528, 40, ShowRecordingsMenu);
-            AddButton("✂", "Abrir el editor KidCut", 570, 40, () => Program.OpenInBrowser(Program.TargetUrl));
-            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 612, 40, Hide);
+            _btnRegion = AddButton("⛶", "", 250, 36, PickRegion);
+            _btnSys = AddButton("🔊", "Grabar el audio del sistema (lo que suena en la PC)", 288, 40, () => { _sysOn = !_sysOn; RefreshToggles(); });
+            _btnMic = AddButton("🎙", "Grabar el micrófono", 330, 40, () => { _micOn = !_micOn; RefreshToggles(); });
+            _btnVoice = AddButton("✨", "Mejorar la voz: quita pitidos y zumbidos constantes y el ruido del ambiente, y sube tu voz por encima del juego sin bajar el juego. Se aplica al guardar, sin cargar la PC mientras grabas.", 372, 36, () => { ScreenRecorder.EnhanceVoice = !ScreenRecorder.EnhanceVoice; RefreshToggles(); });
+            _btnCam = AddButton("📹", "Buscando cámara...", 410, 40, () => { _camOn = !_camOn; RefreshToggles(); SyncBubble(); });
+            _btnShow = AddButton("👁", "Mostrar la cámara en pantalla: arrástrala a donde quieras y se graba ahí. Apagado: se graba sin verla, en la última posición.", 452, 36, () => { _showOn = !_showOn; RefreshToggles(); SyncBubble(); });
+            _btnStyle = AddButton("🎨", "Marco de la cámara: forma, borde, filtro, fondo y colores", 490, 36, CameraStyleForm.ShowDesigner);
+            _btnFps = AddButton("30", "Cuadros por segundo de la grabación", 528, 36, () => { _fps = _fps == 30 ? 60 : 30; RefreshToggles(); });
+            _btnList = AddButton("📂", "Ver las grabaciones y capturas hechas", 566, 40, ShowRecordingsMenu);
+            AddButton("✂", "Abrir el editor KidCut", 608, 40, () => Program.OpenInBrowser(Program.TargetUrl));
+            AddButton("✕", "Ocultar widget (se reabre desde la bandeja o el editor)", 650, 40, Hide);
             RefreshToggles();
 
             // Probing DirectShow takes ~1 s, so the camera button enables itself once a webcam is found
@@ -5304,6 +5405,31 @@ namespace KidCut
             _btnShow.BackColor = _showOn ? OnColor : OffColor;
             _btnShow.Text = _showOn ? "👁" : "🙈";
             _btnFps.Text = _fps.ToString();
+            Rectangle r = ScreenRecorder.Region;
+            _btnRegion.BackColor = r.IsEmpty ? Color.FromArgb(30, 26, 55) : OnColor;
+            _tips.SetToolTip(_btnRegion, r.IsEmpty
+                ? "Zona de grabación: pantalla completa. Clic para elegir una zona."
+                : string.Format("Zona de grabación: {0}×{1} px. Clic para elegir otra (clic sin arrastrar = pantalla completa).", r.Width, r.Height));
+        }
+
+        // The widget and the camera bubble hide while choosing, so they don't sit in the way
+        private void PickRegion()
+        {
+            if (ScreenRecorder.IsRecording) return;
+            bool bubble = CameraBubble.IsActive;
+            Hide();
+            if (bubble) CameraBubble.HideBubble();
+            try
+            {
+                using (RegionPicker picker = new RegionPicker())
+                    if (picker.ShowDialog() == DialogResult.OK) ScreenRecorder.Region = ScreenRecorder.ToPhysicalRegion(picker.Selection);
+            }
+            finally
+            {
+                Show();
+                if (bubble) CameraBubble.ShowBubble();
+                RefreshToggles();
+            }
         }
 
         // Camera on + "show" on = live bubble on the desktop; otherwise no bubble
@@ -5416,7 +5542,7 @@ namespace KidCut
             bool busy = _starting;
             _btnRec.Text = rec ? "■ STOP" : "● REC";
             _btnRec.Enabled = !busy;
-            _btnSys.Enabled = _btnMic.Enabled = _btnFps.Enabled = !rec && !busy;
+            _btnSys.Enabled = _btnMic.Enabled = _btnFps.Enabled = _btnRegion.Enabled = !rec && !busy;
             bool hasCamera = _camSearched && ScreenRecorder.FindCamera() != null;
             _btnCam.Enabled = hasCamera && !rec && !busy;
             _btnShow.Enabled = hasCamera && _camOn && !rec && !busy;
