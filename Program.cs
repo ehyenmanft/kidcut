@@ -5244,6 +5244,66 @@ namespace KidCut
         }
     }
 
+    // Marks the chosen recording area on screen: click-through, never in the recording (WDA_EXCLUDEFROMCAPTURE),
+    // dotted yellow while armed, solid red while recording
+    public class RegionFrame : Form
+    {
+        private const int B = 3;
+        private static readonly Color Hole = Color.FromArgb(255, 0, 255);
+        private bool _recording;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
+
+        public RegionFrame()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Hole;
+            TransparencyKey = Hole;
+            DoubleBuffered = true;
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x08000000; // LAYERED | TRANSPARENT (click-through) | TOOLWINDOW | NOACTIVATE
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try { SetWindowDisplayAffinity(Handle, 0x11); } catch { }
+        }
+
+        // area in logical pixels of the primary screen
+        public void Place(Rectangle area, bool recording)
+        {
+            Bounds = Rectangle.Inflate(area, B, B);
+            _recording = recording;
+            Invalidate();
+            if (!Visible) Show();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Hole);
+            using (Pen p = new Pen(_recording ? Color.FromArgb(230, 40, 60) : Color.FromArgb(255, 210, 0), B))
+            {
+                if (!_recording) p.DashStyle = DashStyle.Dash;
+                e.Graphics.DrawRectangle(p, B / 2, B / 2, Width - B, Height - B);
+            }
+        }
+    }
+
     public class RecorderOverlay : Form
     {
         [DllImport("user32.dll")]
@@ -5266,6 +5326,9 @@ namespace KidCut
         private readonly Button _btnFps;
         private readonly Button _btnList;
         private readonly Button _btnRegion;
+        private readonly RegionFrame _regionFrame = new RegionFrame();
+        private Rectangle _regionLogical;
+        private bool? _frameRecording;
         private readonly Button _btnStyle;
         private readonly Button _btnShow;
         private bool _showOn = true;
@@ -5418,16 +5481,23 @@ namespace KidCut
             if (ScreenRecorder.IsRecording) return;
             bool bubble = CameraBubble.IsActive;
             Hide();
+            _regionFrame.Hide();
             if (bubble) CameraBubble.HideBubble();
             try
             {
                 using (RegionPicker picker = new RegionPicker())
-                    if (picker.ShowDialog() == DialogResult.OK) ScreenRecorder.Region = ScreenRecorder.ToPhysicalRegion(picker.Selection);
+                    if (picker.ShowDialog() == DialogResult.OK)
+                    {
+                        _regionLogical = picker.Selection;
+                        ScreenRecorder.Region = ScreenRecorder.ToPhysicalRegion(picker.Selection);
+
+                    }
             }
             finally
             {
                 Show();
                 if (bubble) CameraBubble.ShowBubble();
+                _frameRecording = null; // put the frame back (also after Esc)
                 RefreshToggles();
             }
         }
@@ -5528,6 +5598,15 @@ namespace KidCut
 
         private void UpdateState()
         {
+            if (ScreenRecorder.Region.IsEmpty)
+            {
+                if (_regionFrame.Visible) _regionFrame.Hide();
+            }
+            else if (_frameRecording != ScreenRecorder.IsRecording)
+            {
+                _frameRecording = ScreenRecorder.IsRecording;
+                _regionFrame.Place(_regionLogical, ScreenRecorder.IsRecording);
+            }
             if (++_ticks % 4 == 0)
             {
                 bool kn = WasapiCapture.KidNoezActive();
