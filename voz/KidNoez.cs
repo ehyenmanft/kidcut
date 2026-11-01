@@ -137,6 +137,21 @@ namespace KidNoez
         Biquad[] _howlNotches = new Biquad[0];
         int _howlBin, _howlRun;
         double _duck = 1;
+        double _fbCapDb = 18; // automatic gain ceiling after feedback; relaxes 1 dB every 20 s
+        public double FeedbackCutDb; // output reduction from feedback (0 .. -24 dB); relaxes 1 dB every 20 s
+
+        // 5-band user EQ: low shelf, three peaks, high shelf
+        public static readonly double[] EqHz = { 100, 300, 1000, 3000, 8000 };
+        readonly double[] _eqDb = new double[5];
+        volatile int _eqVer;
+        int _eqBuilt;
+        Biquad[] _eq = new Biquad[0];
+
+        public void SetEq(double[] db)
+        {
+            lock (_eqDb) Array.Copy(db, _eqDb, _eqDb.Length);
+            _eqVer = _eqVer + 1;
+        }
 
         // _speechDb starts at the target: no boost until real speech has been heard
         double _env = 1e-6, _floorDb = -60, _gate = 1, _speechDb = -18, _comp = 0, _lim = 1;
@@ -168,8 +183,10 @@ namespace KidNoez
                 _rawDelay[_hopPos] = x;
                 if (++_hopPos == Hop) { _hopPos = 0; Frame(asmr); }
                 // The feedback duck also covers bypass: the raw mic into speakers can howl too
-                _duck += (1 - _duck) / (1500 * Rate / 1000.0);
-                float o = (float)((on ? Post(clean, asmr) : raw) * _duck);
+                _duck += (1 - _duck) / (3000 * Rate / 1000.0);
+                _fbCapDb = Math.Min(18, _fbCapDb + 1.0 / (20 * Rate));
+                FeedbackCutDb = Math.Min(0, FeedbackCutDb + 1.0 / (20 * Rate));
+                float o = (float)((on ? Post(clean, asmr) : raw) * _duck * (FeedbackCutDb < 0 ? Math.Pow(10, FeedbackCutDb / 20) : 1));
                 buf[i] = o;
                 outPeak = Math.Max(outPeak, Math.Abs(o));
             }
@@ -227,17 +244,34 @@ namespace KidNoez
             else { _howlRun = tonal ? 1 : 0; _howlBin = kmax; }
             if (_howlRun < 25) return;
             _howlRun = 0;
-            double hz = (double)kmax * Rate / N;
+            double hz = PreciseHz((double)kmax * Rate / N);
             Howls++;
             LastHowlHz = hz;
-            // Break the loop at once (-30 dB, recovers in ~1.5 s), lower the automatic gain and keep a notch there
+            // Break the loop at once (-30 dB, back in ~3 s) and keep it broken: a notch exactly on the tone (a 94 Hz bin
+            // missed it by up to 47 Hz and the howl came back every few seconds) and a gain ceiling the automatic level
+            // cannot climb over again (it used to re-raise the loop gain within ~2 s)
             _duck = 0.03;
-            GainDb = Math.Max(0, GainDb - 6);
-            if (_howlNotches.Length < 8 && _howlHz.All(f => Math.Abs(f - hz) > 60))
+            // Speakers next to an open mic howl at the next-loudest frequency once one is notched: every howl also
+            // lowers the output for good (until it relaxes), so the loop settles just below the point of feedback
+            FeedbackCutDb = Math.Max(-24, FeedbackCutDb - 3);
+            _fbCapDb = Math.Max(0, Math.Min(_fbCapDb, GainDb) - 6);
+            GainDb = Math.Min(GainDb, _fbCapDb);
+            if (_howlNotches.Length < 8 && _howlHz.All(f => Math.Abs(f - hz) > 25))
             {
                 _howlHz.Add(hz);
-                _howlNotches = _howlNotches.Concat(new[] { Biquad.Make("notch", hz, 8, 0) }).ToArray();
+                _howlNotches = _howlNotches.Concat(new[] { Biquad.Make("notch", hz, 12, 0) }).ToArray();
             }
+        }
+
+        // Exact tone frequency from the detector's 12 Hz bins (recent power) near the rough STFT estimate
+        double PreciseHz(double rough)
+        {
+            double bw = (double)Rate / DetN;
+            int lo = Math.Max(1, (int)((rough - 140) / bw)), hi = Math.Min(_dps.Length - 2, (int)((rough + 140) / bw)), k = lo;
+            for (int i = lo; i <= hi; i++) if (_dps[i] > _dps[k]) k = i;
+            double a = Math.Log(_dps[k - 1] + 1e-20), b = Math.Log(_dps[k] + 1e-20), c = Math.Log(_dps[k + 1] + 1e-20);
+            double d = a - 2 * b + c == 0 ? 0 : 0.5 * (a - c) / (a - 2 * b + c);
+            return (k + Math.Max(-0.5, Math.Min(0.5, d))) * bw;
         }
 
         // Whine detector on its own 4096-point FFT (12 Hz bins): at the suppressor's 94 Hz bins a whine barely clears
@@ -265,7 +299,8 @@ namespace KidNoez
             List<KeyValuePair<double, double>> found = new List<KeyValuePair<double, double>>();
             const int R = 64;
             double[] around = new double[2 * R + 1];
-            for (int k = (int)(1000 / bw); k < Math.Min(db.Length - R - 1, (int)(16000 / bw)); k++)
+            // From 100 Hz: mains hum (50/60 Hz harmonics) from analog mics counts too; the 90 Hz high-pass handles below
+            for (int k = Math.Max(R + 1, (int)(100 / bw)); k < Math.Min(db.Length - R - 1, (int)(16000 / bw)); k++)
             {
                 if (db[k] < db[k - 1] || db[k] < db[k + 1]) continue;
                 Array.Copy(db, k - R, around, 0, around.Length);
@@ -278,8 +313,9 @@ namespace KidNoez
             List<double> tones = new List<double>();
             foreach (KeyValuePair<double, double> t in found.OrderByDescending(t => t.Key))
             {
-                if (tones.Count == 6) break;
-                if (tones.All(hz => Math.Abs(hz - t.Value) > 300)) tones.Add(t.Value);
+                if (tones.Count == 8) break;
+                // Peaks of one whine cluster within ~8 % (max 300 Hz); hum harmonics 50 Hz apart stay separate tones
+                if (tones.All(hz => Math.Abs(hz - t.Value) > Math.Max(25, Math.Min(300, 0.08 * t.Value)))) tones.Add(t.Value);
             }
             tones.Sort();
             // Rebuilt only when the set really changes: new filters restart from zero state (a tiny click)
@@ -295,6 +331,18 @@ namespace KidNoez
             // Notches go after the STFT: the detector must keep seeing the whine it removes, or it would drop the notch
             foreach (Biquad n in _notches) x = n.Run(x);
             foreach (Biquad n in _howlNotches) x = n.Run(x);
+            // User EQ before the automatic level and compressor, so boosting a band never pushes the output into clipping
+            if (_eqBuilt != _eqVer)
+            {
+                _eqBuilt = _eqVer;
+                double[] g;
+                lock (_eqDb) g = (double[])_eqDb.Clone();
+                _eq = Enumerable.Range(0, g.Length).Where(i => g[i] != 0).Select(i =>
+                    i == 0 ? Biquad.Make("lshelf", EqHz[i], 0.707, g[i]) :
+                    i == g.Length - 1 ? Biquad.Make("hshelf", EqHz[i], 0.707, g[i]) :
+                    Biquad.Make("peak", EqHz[i], 1.0, g[i])).ToArray();
+            }
+            foreach (Biquad q in _eq) x = q.Run(x);
             x = asmr ? _air.Run(_warm.Run(x)) : _lp.Run(_presence.Run(x));
             double a = x * x;
             _env += (a - _env) / (10 * ms);
@@ -311,7 +359,7 @@ namespace KidNoez
 
             // Automatic level: learns only from sound well above the room floor (speech), up to +18 dB
             if (envDb > thr + 10) _speechDb += (envDb - _speechDb) / (3000 * ms);
-            double target = Math.Max(0, Math.Min(18, (asmr ? -22 : -18) - _speechDb));
+            double target = Math.Max(0, Math.Min(_fbCapDb, (asmr ? -22 : -18) - _speechDb));
             GainDb += (target - GainDb) / (2000 * ms);
             x *= _gate * Math.Pow(10, GainDb / 20);
 
@@ -847,7 +895,13 @@ namespace KidNoez
     {
         static readonly Color Bg = Color.FromArgb(10, 12, 20), Chip = Color.FromArgb(32, 36, 48), Text1 = Color.FromArgb(200, 208, 220),
             TitleC = Color.FromArgb(155, 232, 255), OnC = Color.FromArgb(125, 255, 178), OffC = Color.FromArgb(255, 107, 107);
-        const int W = 320, HeaderH = 30, BodyH = 106, SettingsH = 172;
+        const int W = 320, HeaderH = 30, BodyH = 106, SettingsH = 172, EqH = 150;
+        static readonly string[] EqNames = { "Graves\n100 Hz", "Cuerpo\n300 Hz", "Medios\n1 kHz", "Presencia\n3 kHz", "Brillo\n8 kHz" };
+        readonly Panel _eqPanel = new Panel();
+        readonly TrackBar[] _eqBars = new TrackBar[5];
+        readonly Label[] _eqVals = new Label[5];
+        readonly Button _btnEq;
+        bool _showEq;
         const double ActiveOpacity = 0.94, FadedOpacity = 0.45;
 
         readonly AudioEngine _engine = new AudioEngine();
@@ -915,6 +969,31 @@ namespace KidNoez
             _tips.SetToolTip(_meterIn, "Entrada (micrófono)");
             _tips.SetToolTip(_meterOut, "Salida (voz procesada)");
 
+            _btnEq = HeaderButton("EQ", "Ecualizador de 5 bandas", W - 12 - 116, () => { _showEq = !_showEq; _collapsed = false; LayoutPanel(); SaveSettings(); }, false);
+            _btnEq.Width = 32; // two letters do not fit the 24 px icon buttons
+            _eqPanel.BackColor = Bg;
+            for (int i = 0; i < 5; i++)
+            {
+                int x = 12 + i * 52;
+                _eqVals[i] = new Label { Bounds = new Rectangle(x, 2, 48, 16), TextAlign = ContentAlignment.MiddleCenter, ForeColor = OnC, Text = "0" };
+
+                _eqBars[i] = new TrackBar
+                {
+                    Orientation = Orientation.Vertical, Minimum = -12, Maximum = 12, TickFrequency = 6, TickStyle = TickStyle.BottomRight,
+                    SmallChange = 1, LargeChange = 3, Bounds = new Rectangle(x + 4, 18, 44, 92), BackColor = Bg, Value = 0
+                };
+                _eqBars[i].ValueChanged += (s, e) => ApplyEq();
+                _tips.SetToolTip(_eqBars[i], EqNames[i].Replace("\n", " · "));
+                Label name = new Label { Bounds = new Rectangle(x - 2, 112, 54, 32), TextAlign = ContentAlignment.TopCenter, Text = EqNames[i], ForeColor = Color.FromArgb(150, 158, 175), Font = new Font("Segoe UI", 7.5f) };
+                _eqPanel.Controls.AddRange(new Control[] { _eqVals[i], _eqBars[i], name });
+            }
+            Button flat = new Button { Text = "Plano", Bounds = new Rectangle(274, 56, 40, 24), FlatStyle = FlatStyle.Flat, BackColor = Chip, ForeColor = Text1, Font = new Font("Segoe UI", 7.5f), Cursor = Cursors.Hand, TabStop = false };
+            flat.FlatAppearance.BorderSize = 0;
+            flat.Click += (s, e) => { foreach (TrackBar b in _eqBars) b.Value = 0; };
+            _tips.SetToolTip(flat, "Ecualizador plano (todo a 0 dB)");
+            _eqPanel.Controls.Add(flat);
+            _eqPanel.MouseDown += Drag;
+
             _settings.Bounds = new Rectangle(0, HeaderH + BodyH, W, SettingsH);
             _settings.BackColor = Bg;
             Label li = new Label { Text = "Micrófono", Bounds = new Rectangle(14, 2, W - 28, 18) };
@@ -932,7 +1011,7 @@ namespace KidNoez
                 c.SelectedIndexChanged += (s, e) => { if (!_loading) Restart(); };
             }
             _settings.Controls.AddRange(new Control[] { li, _input, lo, _output, _status });
-            Controls.AddRange(new Control[] { _title, _toggle, _state, _asmr, _meterIn, _meterOut, _settings });
+            Controls.AddRange(new Control[] { _title, _toggle, _state, _asmr, _meterIn, _meterOut, _eqPanel, _settings });
             foreach (Control c in new Control[] { this, _title, _state, _settings, li, lo, _status }) c.MouseDown += Drag;
 
             _miToggle = new ToolStripMenuItem("Activar mejora", null, (s, e) => { _toggle.On = !_toggle.On; Apply(); });
@@ -1029,11 +1108,25 @@ namespace KidNoez
             Application.Exit();
         }
 
+        // Bars hold -gain (a vertical TrackBar has its minimum at the top; + belongs at the top)
+        void ApplyEq()
+        {
+            double[] g = _eqBars.Select(b => (double)-b.Value).ToArray();
+            for (int i = 0; i < 5; i++) _eqVals[i].Text = g[i] > 0 ? "+" + g[i] : g[i].ToString();
+            _engine.Dsp.SetEq(g);
+            _lastActive = DateTime.Now;
+            SaveSettings();
+        }
+
         void LayoutPanel()
         {
             foreach (Control c in new Control[] { _toggle, _state, _asmr, _meterIn, _meterOut }) c.Visible = !_collapsed;
+            _eqPanel.Visible = !_collapsed && _showEq;
+            _eqPanel.Bounds = new Rectangle(0, HeaderH + BodyH, W, EqH);
             _settings.Visible = !_collapsed && _showSettings;
-            Height = HeaderH + (_collapsed ? 0 : BodyH + (_showSettings ? SettingsH : 0));
+            _settings.Top = HeaderH + BodyH + (_showEq ? EqH : 0);
+            Height = HeaderH + (_collapsed ? 0 : BodyH + (_showEq ? EqH : 0) + (_showSettings ? SettingsH : 0));
+            _btnEq.ForeColor = _showEq ? TitleC : Text1;
             _btnCollapse.Text = _collapsed ? "▢" : "–";
             _tips.SetToolTip(_btnCollapse, _collapsed ? "Restaurar" : "Minimizar (colapsar al cintillo)");
             _btnSettings.ForeColor = _showSettings ? TitleC : Text1;
@@ -1087,6 +1180,17 @@ namespace KidNoez
             _asmrOn = st.TryGetValue("asmr", out v) && v == "1";
             _collapsed = st.TryGetValue("collapsed", out v) && v == "1";
             _showSettings = st.TryGetValue("settings", out v) && v == "1";
+            _showEq = st.TryGetValue("eqpanel", out v) && v == "1";
+            if (st.TryGetValue("eq", out v))
+            {
+                string[] parts = v.Split(',');
+                for (int i = 0; i < Math.Min(5, parts.Length); i++)
+                {
+                    int g;
+                    if (int.TryParse(parts[i], out g)) _eqBars[i].Value = -Math.Max(-12, Math.Min(12, g));
+                }
+            }
+            ApplyEq();
             LayoutPanel();
             int x, y;
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
@@ -1160,7 +1264,7 @@ namespace KidNoez
             {
                 _seenHowls = howls;
                 _howlUntil = DateTime.Now.AddSeconds(4);
-                _state.Text = "⚠ Acople: salida bajada";
+                _state.Text = string.Format("⚠ Acople: salida {0:0} dB", _engine.Dsp.FeedbackCutDb);
                 _state.ForeColor = OffC;
                 _lastActive = DateTime.Now;
                 if (!_howlWarned)
@@ -1201,6 +1305,8 @@ namespace KidNoez
                     "outv=2",
                     "collapsed=" + (_collapsed ? "1" : "0"),
                     "settings=" + (_showSettings ? "1" : "0"),
+                    "eqpanel=" + (_showEq ? "1" : "0"),
+                    "eq=" + string.Join(",", _eqBars.Select(b => (-b.Value).ToString())),
                     "x=" + Left,
                     "y=" + Top
                 });
