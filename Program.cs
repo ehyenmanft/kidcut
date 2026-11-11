@@ -5472,7 +5472,7 @@ namespace KidCut
             _btnRegion.BackColor = r.IsEmpty ? Color.FromArgb(30, 26, 55) : OnColor;
             _tips.SetToolTip(_btnRegion, r.IsEmpty
                 ? "Zona de grabación: pantalla completa. Clic para elegir una zona."
-                : string.Format("Zona de grabación: {0}×{1} px. Clic para elegir otra (clic sin arrastrar = pantalla completa).", r.Width, r.Height));
+                : string.Format("Zona de grabación: {0}×{1} px. Se usa en la próxima toma y al terminarla vuelve a pantalla completa. Clic para elegir otra (clic sin arrastrar = pantalla completa).", r.Width, r.Height));
         }
 
         // The widget and the camera bubble hide while choosing, so they don't sit in the way
@@ -5598,6 +5598,13 @@ namespace KidCut
 
         private void UpdateState()
         {
+            // The area is for one take: once it ends, the frame goes away and the next take is full screen again
+            if (_frameRecording == true && !ScreenRecorder.IsRecording)
+            {
+                ScreenRecorder.Region = Rectangle.Empty;
+                _frameRecording = null;
+                RefreshToggles();
+            }
             if (ScreenRecorder.Region.IsEmpty)
             {
                 if (_regionFrame.Visible) _regionFrame.Hide();
